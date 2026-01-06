@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { type BenchmarkResult, type ReadingStats, type ParagraphPacing, type SentimentPoint, type EditorInsight } from '@/lib/analysis';
+import { type GrammarIssue } from '@/lib/grammar';
 
 export interface AnalysisResults {
     stats: ReadingStats | null;
@@ -9,6 +10,7 @@ export interface AnalysisResults {
     sentimentArc: SentimentPoint[];
     overused: { word: string; count: number; synonyms: string[] }[];
     insights: EditorInsight[];
+    grammarIssues: GrammarIssue[];
     contextMatches: { name: string; content: string }[];
 }
 

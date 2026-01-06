@@ -10,6 +10,7 @@ import {
     findContextMatches,
     type GenreType
 } from '@/lib/analysis';
+import { checkGrammarAndMechanics } from '@/lib/grammar';
 
 // Listen for messages from the main thread
 self.onmessage = (e: MessageEvent) => {
@@ -34,6 +35,9 @@ self.onmessage = (e: MessageEvent) => {
         const overused = getOverusedWords(plainText);
         const insights = generateEditorInsights(plainText);
 
+        // Grammar checking (now in worker!)
+        const grammarIssues = checkGrammarAndMechanics(plainText);
+
         // Context matching (World Bible / Lore)
         const contextMatches = contextFiles ? findContextMatches(plainText, contextFiles) : [];
 
@@ -47,6 +51,7 @@ self.onmessage = (e: MessageEvent) => {
                 sentimentArc,
                 overused,
                 insights,
+                grammarIssues,
                 contextMatches
             }
         });

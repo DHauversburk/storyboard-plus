@@ -250,18 +250,6 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
     // --- Dictation ---
     const { isListening, transcript, resetTranscript, startListening, stopListening } = useDictation();
 
-    // --- Grammar Analysis ---
-    const [grammarIssues, setGrammarIssues] = useState<GrammarIssue[]>([]);
-
-    // Check grammar on content change
-    useEffect(() => {
-        if (!debouncedContent) return;
-        const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-        // Run lightly - keeping grammar on main thread for now as it's separate logic
-        const issues = checkGrammarAndMechanics(plainText);
-        setGrammarIssues(issues);
-    }, [debouncedContent]);
-
     // Effect to insert dictated text
     useEffect(() => {
         if (transcript && editorRef.current) {
@@ -359,6 +347,10 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
 
     // Worker Analysis Hook
     const { results: analysisResults, isAnalyzing: isWorkerAnalyzing } = useAnalysis(debouncedContent, selectedGenre, obsidianFiles);
+
+    // Grammar results (now from worker!)
+    const grammarIssues = analysisResults?.grammarIssues || [];
+
     // Sync hook results to local state for now if needed, or just usage direct
     useEffect(() => {
         if (analysisResults?.genreResults) {
@@ -1456,9 +1448,9 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                                             <div className="flex items-center gap-2">
                                                 {/* Type Badge */}
                                                 <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold uppercase ${issue.type === 'grammar' ? 'bg-red-500/20 text-red-400' :
-                                                        issue.type === 'style' ? 'bg-blue-500/20 text-blue-400' :
-                                                            issue.type === 'typo' ? 'bg-yellow-500/20 text-yellow-400' :
-                                                                'bg-purple-500/20 text-purple-400'
+                                                    issue.type === 'style' ? 'bg-blue-500/20 text-blue-400' :
+                                                        issue.type === 'typo' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                            'bg-purple-500/20 text-purple-400'
                                                     }`}>
                                                     {issue.type}
                                                 </span>
