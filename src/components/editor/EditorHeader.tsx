@@ -49,6 +49,13 @@ interface EditorHeaderProps {
     // Tabs
     docStructure: { title: string, tabs: { id: string, title: string, content: string }[] } | null;
     onTabSelect: (content: string) => void;
+
+    // Undo/Redo & Shortcuts
+    canUndo: boolean;
+    canRedo: boolean;
+    onUndo: () => void;
+    onRedo: () => void;
+    onToggleShortcuts: () => void;
 }
 
 export const EditorHeader: React.FC<EditorHeaderProps> = ({
@@ -75,7 +82,12 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
     onToggleTools,
     onSaveToDrive,
     docStructure,
-    onTabSelect
+    onTabSelect,
+    canUndo,
+    canRedo,
+    onUndo,
+    onRedo,
+    onToggleShortcuts
 }) => {
     if (isFocusMode) return null;
 
@@ -178,6 +190,35 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
                             className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-all flex-shrink-0"
                         >
                             <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5" stroke="currentColor" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                        </button>
+
+                        {/* Undo/Redo Group */}
+                        <div className="flex items-center bg-black/20 rounded-lg p-0.5 border border-white/5 mx-2">
+                            <button
+                                onClick={onUndo}
+                                disabled={!canUndo}
+                                className={`p-1 rounded transition-all ${canUndo ? 'text-gray-400 hover:text-white hover:bg-white/10' : 'text-gray-700 cursor-not-allowed'}`}
+                                title="Undo (Ctrl+Z)"
+                            >
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
+                            </button>
+                            <div className="w-px h-3 bg-white/10 mx-0.5" />
+                            <button
+                                onClick={onRedo}
+                                disabled={!canRedo}
+                                className={`p-1 rounded transition-all ${canRedo ? 'text-gray-400 hover:text-white hover:bg-white/10' : 'text-gray-700 cursor-not-allowed'}`}
+                                title="Redo (Ctrl+Shift+Z)"
+                            >
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 10h-10a8 8 0 00-8 8v2M21 10l-6 6m6-6l-6-6" /></svg>
+                            </button>
+                        </div>
+
+                        <button
+                            onClick={onToggleShortcuts}
+                            className="p-1.5 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-all flex-shrink-0"
+                            title="Keyboard Shortcuts"
+                        >
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
                         </button>
 
                         {/* Enhanced Save Status */}

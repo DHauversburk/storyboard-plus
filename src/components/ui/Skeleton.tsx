@@ -1,33 +1,33 @@
+
 import React from 'react';
 
 interface SkeletonProps {
     className?: string;
+    width?: string | number;
+    height?: string | number;
 }
 
-export const Skeleton: React.FC<SkeletonProps> = ({ className = '' }) => (
-    <div
-        className={`animate-pulse bg-white/10 rounded ${className}`}
-        aria-hidden="true"
-    />
-);
+export const Skeleton: React.FC<SkeletonProps> = ({ className = "", width, height }) => {
+    return (
+        <div
+            className={`bg-white/10 animate-pulse rounded ${className}`}
+            style={{
+                width: width,
+                height: height
+            }}
+        />
+    );
+};
 
-export const FileListSkeleton: React.FC = () => (
-    <div className="space-y-2 p-2" role="status" aria-label="Loading files">
-        {[...Array(6)].map((_, i) => (
-            <div key={i} className="flex items-center gap-2">
-                <Skeleton className="w-5 h-5 rounded" />
-                <Skeleton className="flex-1 h-4" />
-            </div>
-        ))}
-        <span className="sr-only">Loading files...</span>
-    </div>
-);
-
-export const StatsSkeleton: React.FC = () => (
-    <div className="space-y-3" role="status" aria-label="Loading statistics">
-        <Skeleton className="h-6 w-32" />
-        <Skeleton className="h-4 w-24" />
-        <Skeleton className="h-4 w-28" />
-        <span className="sr-only">Loading statistics...</span>
-    </div>
-);
+export const FileListSkeleton: React.FC = () => {
+    return (
+        <div className="space-y-2 p-2">
+            {[1, 2, 3, 4, 5].map(i => (
+                <div key={i} className="flex items-center gap-2">
+                    <Skeleton width={16} height={16} className="bg-white/5" />
+                    <Skeleton width="80%" height={12} className="bg-white/5" />
+                </div>
+            ))}
+        </div>
+    );
+};

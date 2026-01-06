@@ -19,13 +19,15 @@ You are 90% there! You are in the Google Cloud Console, which is perfect. Follow
 1. Click **Credentials** on the left sidebar again.
 2. Click **+ Create Credentials** (at the top) -> Select **OAuth client ID**.
 3. **Application type**: Select **Web application**.
-4. **Name**: `StoryBoard Local`.
+4. **Name**: `StoryBoard Web`.
 5. **Authorized JavaScript origins**:
    - Click **+ Add URI**.
    - Enter: `http://localhost:3000`
+   - **IMPORTANT (For Vercel)**: Click **+ Add URI** again and enter your production URL: `https://storyboard-plus.vercel.app`
 6. **Authorized redirect URIs**:
    - Click **+ Add URI**.
    - Enter: `http://localhost:3000`
+   - **IMPORTANT (For Vercel)**: Click **+ Add URI** again and enter: `https://storyboard-plus.vercel.app`
 7. Click **Create**.
 8. **COPY THE CLIENT ID**. It will look something like `123456...apps.googleusercontent.com`.
    - *Note: You can ignore the "Client Secret" for this specific setup.*
@@ -36,6 +38,6 @@ You are 90% there! You are in the Google Cloud Console, which is perfect. Follow
 3. **COPY THE API KEY**. It will start with `AIza...`.
 
 ## Phase 4: Plug them into StoryBoard Plus
-1. Go to the **Settings** page in StoryBoard Plus (I am building this for you now!).
+1. Go to the **Settings** page in StoryBoard Plus.
 2. Paste the **Client ID** and **API Key**.
 3. Click **Save Connection**.

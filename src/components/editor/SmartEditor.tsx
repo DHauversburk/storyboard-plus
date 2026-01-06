@@ -24,6 +24,10 @@ import { StreakWidget } from './StreakWidget';
 import { useAnalysis } from './useAnalysis';
 import { generateExport, downloadBlob } from '@/lib/simpleExporter';
 import { exportDocumentAsDocx, type DocxHeaderOptions, type FrontMatterOptions, type PageOptions } from '@/lib/exporter';
+import { ShortcutsHelp } from './ShortcutsHelp';
+import { Skeleton } from '../ui/Skeleton';
+import { HighlightMenu } from './HighlightMenu';
+import { getSynonyms } from '@/lib/analysis';
 
 interface SmartEditorProps {
     initialContent?: string;
@@ -47,6 +51,26 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
     const [activeFileName, setActiveFileName] = useState<string | null>(null); // New state for file name
     const [driveBreadcrumbs, setDriveBreadcrumbs] = useState<{ id: string, name: string }[]>([{ id: 'root', name: 'My Drive' }]);
     const [showStartScreen, setShowStartScreen] = useState(!initialContent);
+    const [showShortcuts, setShowShortcuts] = useState(false);
+    const [showExportMenu, setShowExportMenu] = useState(false);
+    const [typewriterMode, setTypewriterMode] = useState(false);
+    const sessionInitialized = React.useRef(false);
+
+    // Dictation Hook
+    const { isListening, startListening, stopListening, transcript } = useDictation();
+
+    // Genre Analysis State
+    const [selectedGenre, setSelectedGenre] = useState<GenreType>('Literary');
+    const [genreResults, setGenreResults] = useState<BenchmarkResult[]>([]);
+
+    // Highlight Menu State
+    const [highlightMenuPos, setHighlightMenuPos] = useState<{ top: number, left: number } | null>(null);
+    const [highlightSelection, setHighlightSelection] = useState<string>('');
+    const [highlightSynonyms, setHighlightSynonyms] = useState<string[]>([]);
+    const [highlightCodexEntry, setHighlightCodexEntry] = useState<{ name: string, content: string } | null>(null);
+
+    const [obsidianFiles, setObsidianFiles] = useState<ObsidianFile[]>([]);
+    const [viewingLore, setViewingLore] = useState<{ name: string, content: string } | null>(null);
 
     // Debounce content and notes
     const debouncedContent = useDebounce(content, 1500);
@@ -216,62 +240,24 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
     const [sessionStartWords, setSessionStartWords] = useState(0); // Words at session start
     const [goalEnabled, setGoalEnabled] = useState(true);
 
-    // Load goal preferences from localStorage
+    // --- Consolidated Preference Management ---
+    // Load all preferences from localStorage on mount
     useEffect(() => {
         const savedGoal = localStorage.getItem('sb_dailyGoal');
         const savedEnabled = localStorage.getItem('sb_goalEnabled');
+        const savedTypewriter = localStorage.getItem('sb_typewriterMode');
+
         if (savedGoal) setDailyGoal(parseInt(savedGoal, 10));
         if (savedEnabled !== null) setGoalEnabled(savedEnabled === 'true');
-    }, []);
-
-    // Save goal preferences to localStorage
-    useEffect(() => {
-        localStorage.setItem('sb_dailyGoal', String(dailyGoal));
-        localStorage.setItem('sb_goalEnabled', String(goalEnabled));
-    }, [dailyGoal, goalEnabled]);
-
-    // Session tracking moved after stats declaration
-
-    const sessionInitialized = React.useRef(false);
-
-    // --- Typewriter Scrolling ---
-    const [typewriterMode, setTypewriterMode] = useState(false);
-
-    // --- Export ---
-    const [showExportMenu, setShowExportMenu] = useState(false);
-
-    // --- Genre Analysis ---
-    const [selectedGenre, setSelectedGenre] = useState<GenreType>('Thriller');
-    // Hook moved below obsidianFiles definition
-    const [genreResults, setGenreResults] = useState<BenchmarkResult[]>([]); // Temp placeholder, will replace
-
-
-
-    // --- Dictation ---
-    const { isListening, transcript, resetTranscript, startListening, stopListening } = useDictation();
-
-    // Effect to insert dictated text
-    useEffect(() => {
-        if (transcript && editorRef.current) {
-            editorRef.current.focus();
-            // Use execCommand to insert at cursor position - deprecated but reliable for this
-            document.execCommand('insertText', false, transcript + ' ');
-            resetTranscript();
-        }
-    }, [transcript, resetTranscript]);
-
-    // (Removed manual genre benchmark effect - handled by worker)
-
-    // Load typewriter preference from localStorage
-    useEffect(() => {
-        const savedTypewriter = localStorage.getItem('sb_typewriterMode');
         if (savedTypewriter !== null) setTypewriterMode(savedTypewriter === 'true');
     }, []);
 
-    // Save typewriter preference
+    // Save preferences when they change
     useEffect(() => {
+        localStorage.setItem('sb_dailyGoal', String(dailyGoal));
+        localStorage.setItem('sb_goalEnabled', String(goalEnabled));
         localStorage.setItem('sb_typewriterMode', String(typewriterMode));
-    }, [typewriterMode]);
+    }, [dailyGoal, goalEnabled, typewriterMode]);
 
     // Scroll to keep cursor centered when typewriter mode is on
     const scrollToCursor = useCallback(() => {
@@ -331,8 +317,135 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
         if (editorRef.current && isExternalUpdate.current) {
             editorRef.current.innerHTML = content || '';
             isExternalUpdate.current = false;
+        } else if (isListening && transcript) {
+            // Handle dictation updates
+            if (editorRef.current) {
+                // Simple append for now - in production this needs cursor handling
+                const newContent = editorRef.current.innerHTML + ' ' + transcript;
+                editorRef.current.innerHTML = newContent;
+                setContent(newContent);
+            }
         }
-    }, [content]);
+    }, [content, transcript, isListening]);
+
+    // --- Improved Selection Handling for Highlight Menu ---
+    useEffect(() => {
+        const handleSelectionChange = () => {
+            const selection = window.getSelection();
+
+            // Basic Validation
+            if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+                setHighlightMenuPos(null);
+                return;
+            }
+
+            const range = selection.getRangeAt(0);
+            const text = selection.toString().trim();
+
+            // Ensure selection is inside OUR editor
+            if (!editorRef.current || !editorRef.current.contains(range.commonAncestorContainer)) {
+                // Ignore selections outside the editor
+                setHighlightMenuPos(null);
+                return;
+            }
+
+            // Constraint: Only show for reasonable text lengths (1-50 chars)
+            if (text.length > 0 && text.length < 50) {
+                const rect = range.getBoundingClientRect();
+
+                // If rect is 0 (hidden), ignore
+                if (rect.width === 0 || rect.height === 0) {
+                    setHighlightMenuPos(null);
+                    return;
+                }
+
+                // Determine matches
+                let codexMatch = null;
+                const cleanText = text.toLowerCase();
+                obsidianFiles.forEach(f => {
+                    if (f.name.toLowerCase().replace('.md', '') === cleanText) {
+                        codexMatch = f;
+                    }
+                });
+
+                const synonyms = getSynonyms(text);
+
+                // ALWAYS show menu if text is selected
+                setHighlightMenuPos({
+                    top: rect.top + window.scrollY,
+                    left: rect.left + rect.width / 2 + window.scrollX
+                });
+                setHighlightSelection(text);
+                setHighlightSynonyms(synonyms);
+                setHighlightCodexEntry(codexMatch);
+            } else {
+                setHighlightMenuPos(null);
+            }
+        };
+
+        // Debounce the selection change 
+        let debounceTimer: NodeJS.Timeout;
+        const onSelectionChange = () => {
+            // Basic instant check: if no selection, hide immediately
+            const sel = window.getSelection();
+            if (!sel || sel.isCollapsed) {
+                setHighlightMenuPos(null);
+            }
+
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                handleSelectionChange();
+            }, 300);
+        };
+
+        document.addEventListener('selectionchange', onSelectionChange);
+
+        const onScroll = () => {
+            if (highlightMenuPos) setHighlightMenuPos(null);
+        };
+        window.addEventListener('scroll', onScroll, { capture: true });
+
+        return () => {
+            document.removeEventListener('selectionchange', onSelectionChange);
+            window.removeEventListener('scroll', onScroll, { capture: true });
+            clearTimeout(debounceTimer);
+        };
+    }, [highlightMenuPos, obsidianFiles]);
+
+    // --- Jump to Context Helper ---
+    const handleJumpToContext = (contextText: string) => {
+        if (!editorRef.current || !contextText) return;
+
+        // Clean context (remove quotes, trim)
+        const cleanContext = contextText.replace(/^"|"$/g, '').trim();
+        if (!cleanContext) return;
+
+        // Attempt window.find first (Chrome/Simpler)
+        // Note: window.find is non-standard but widely supported in Chromium/Firefox for this purpose
+        // It highlights the text natively.
+        // We first reset selection to ensure we search from top or just try to find.
+
+        // Simple heuristic: Try to find the text. 
+        // 1. Reset selection to beginning of editor
+        const selection = window.getSelection();
+        if (selection) {
+            selection.removeAllRanges();
+            const range = document.createRange();
+            range.selectNodeContents(editorRef.current);
+            range.collapse(true); // Start at beginning
+            selection.addRange(range);
+        }
+
+        // 2. Execute Find
+        // @ts-ignore - window.find is non-standard but works
+        const found = window.find(cleanContext, false, false, true, false, true, false);
+
+        if (!found) {
+            // Fallback: If exact match failed, try to match a smaller chunk (first 20 chars)
+            // @ts-ignore
+            window.find(cleanContext.substring(0, 20), false, false, true, false, true, false);
+        }
+    };
 
     // Helper to set content from external sources
     const setContentExternal = useCallback((newContent: string) => {
@@ -341,9 +454,6 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
     }, []);
 
     // ... (rest of useEffects)
-
-    const [obsidianFiles, setObsidianFiles] = useState<ObsidianFile[]>([]);
-    const [viewingLore, setViewingLore] = useState<{ name: string, content: string } | null>(null);
 
     // Worker Analysis Hook
     const { results: analysisResults, isAnalyzing: isWorkerAnalyzing } = useAnalysis(debouncedContent, selectedGenre, obsidianFiles);
@@ -720,6 +830,58 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
 
     return (
         <div className="flex h-full w-full overflow-hidden relative">
+            <style jsx global>{`
+                .smart-editor-content {
+                    padding-left: 60px !important; /* Force space for numbers */
+                    padding-right: 40px;
+                    padding-top: 40px;
+                    padding-bottom: 40px;
+                    line-height: 1.8;
+                    font-size: 1.1rem;
+                    color: #e5e7eb;
+                    tab-size: 4;
+                    counter-reset: para;
+                }
+                .smart-editor-content > * {
+                    position: relative;
+                }
+                /* Number paragraphs, headings, and divs that contain text */
+                .smart-editor-content p, 
+                .smart-editor-content h1, 
+                .smart-editor-content h2, 
+                .smart-editor-content h3, 
+                .smart-editor-content h4, 
+                .smart-editor-content h5, 
+                .smart-editor-content h6,
+                .smart-editor-content div,
+                .smart-editor-content li {
+                    counter-increment: para;
+                }
+                /* Hide counter on empty divs or br-only divs if possible, but CSS :has is new. 
+                   For now, we just target typical text containers */
+
+                .smart-editor-content p::before,
+                .smart-editor-content h1::before,
+                .smart-editor-content h2::before,
+                .smart-editor-content h3::before,
+                .smart-editor-content div::before,
+                .smart-editor-content li::before {
+                    content: counter(para);
+                    position: absolute;
+                    left: -45px; /* Moved further left to sit in padding */
+                    width: 30px;
+                    text-align: right;
+                    color: #4b5563; 
+                    opacity: 0.5;
+                    font-size: 0.7rem;
+                    font-family: monospace;
+                    user-select: none;
+                    top: 2px;
+                    pointer-events: none;
+                }
+                /* Don't number empty dividers or small wrappers if they lack text? 
+                   Hard to distiguish via CSS. We rely on the structure being somewhat clean. */
+            `}</style>
 
             {/* --- LEFT COLUMN: Project Explorer --- */}
             <ProjectExplorer
@@ -786,6 +948,12 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                     onSaveToDrive={handleSaveToDrive}
                     docStructure={docStructure}
                     onTabSelect={setContentExternal}
+                    // Undo/Redo Props
+                    canUndo={canUndo}
+                    canRedo={canRedo}
+                    onUndo={undo}
+                    onRedo={redo}
+                    onToggleShortcuts={() => setShowShortcuts(prev => !prev)}
                 />
 
 
@@ -808,7 +976,7 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                             ref={editorRef}
                             contentEditable
                             suppressContentEditableWarning
-                            className="w-full min-h-full bg-transparent p-6 md:p-8 outline-none text-gray-200 max-w-6xl mx-auto block leading-relaxed transition-all"
+                            className="w-full min-h-full bg-transparent p-6 md:p-8 outline-none text-gray-200 max-w-6xl mx-auto block leading-relaxed transition-all smart-editor-content"
                             onKeyDown={handleKeyDown}
                             onInput={handleEditorInput}
                             spellCheck={true}
@@ -1051,6 +1219,23 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                                             </div>
                                         ))}
                                     </div>
+                                ) : isWorkerAnalyzing ? (
+                                    <div className="space-y-3 mt-1">
+                                        <div className="flex flex-col gap-1">
+                                            <div className="flex justify-between items-center text-xs">
+                                                <Skeleton width={80} height={12} className="bg-white/5" />
+                                                <Skeleton width={30} height={12} className="bg-white/5" />
+                                            </div>
+                                            <Skeleton width="100%" height={6} className="bg-white/5" />
+                                        </div>
+                                        <div className="flex flex-col gap-1">
+                                            <div className="flex justify-between items-center text-xs">
+                                                <Skeleton width={90} height={12} className="bg-white/5" />
+                                                <Skeleton width={30} height={12} className="bg-white/5" />
+                                            </div>
+                                            <Skeleton width="100%" height={6} className="bg-white/5" />
+                                        </div>
+                                    </div>
                                 ) : (
                                     <p className="text-[10px] text-gray-600 italic">Write more (100+ words) to see analysis.</p>
                                 )}
@@ -1077,7 +1262,7 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                                                     </span>
                                                 </div>
                                                 <p className="text-gray-300 mb-1">{issue.message}</p>
-                                                <p className="font-mono text-[10px] text-gray-500 bg-black/20 p-1 rounded">"{issue.context}"</p>
+                                                <p className="font-mono text-[10px] text-gray-500 bg-black/20 p-1 rounded">&quot;{issue.context}&quot;</p>
                                                 {issue.suggestion && (
                                                     <div className="mt-1 text-green-400 text-[10px]">
                                                         ➜ {issue.suggestion}
@@ -1231,7 +1416,16 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                                                 }`}>{insight.type}</span>
                                         </div>
                                         <p className="text-sm text-gray-200 font-medium">{insight.message}</p>
-                                        <p className="text-xs text-gray-500 italic border-t border-white/5 pt-1 mt-1">{insight.context}</p>
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleJumpToContext(insight.context);
+                                            }}
+                                            className="text-xs text-gray-500 italic border-t border-white/5 pt-1 mt-1 text-left hover:text-white transition-colors w-full"
+                                            title="Click to highlight in text"
+                                        >
+                                            {insight.context}
+                                        </button>
                                     </div>
                                 ))}
                             </div>
@@ -1400,7 +1594,7 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                                 return overused.slice(0, 4).map((item, idx) => (
                                     <div key={idx} className="p-2 bg-white/5 rounded-lg border border-white/10">
                                         <div className="flex items-center justify-between mb-1">
-                                            <span className="font-semibold text-amber-300 text-sm">"{item.word}"</span>
+                                            <span className="font-semibold text-amber-300 text-sm">&quot;{item.word}&quot;</span>
                                             <span className="text-[10px] text-gray-500">×{item.count}</span>
                                         </div>
                                         <div className="flex flex-wrap gap-1">
@@ -1435,7 +1629,12 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                             )}
                         </h3>
                         <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
-                            {grammarIssues.length === 0 ? (
+                            {isWorkerAnalyzing ? (
+                                <div className="space-y-3">
+                                    <Skeleton width="100%" height={40} className="bg-white/5" />
+                                    <Skeleton width="100%" height={40} className="bg-white/5" />
+                                </div>
+                            ) : grammarIssues.length === 0 ? (
                                 <div className="text-xs text-gray-600 text-center py-4 flex flex-col items-center gap-2">
                                     <span className="text-2xl">✅</span>
                                     <span>No issues detected!</span>
@@ -1472,7 +1671,7 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                                         {issue.context && (
                                             <div className="p-2 bg-black/30 rounded border border-white/5">
                                                 <p className="text-[11px] text-gray-400 font-mono">
-                                                    "{issue.context}"
+                                                    &quot;{issue.context}&quot;
                                                 </p>
                                             </div>
                                         )}
@@ -1584,6 +1783,38 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                 onConnectDrive={() => {
                     setShowStartScreen(false);
                     handleDriveConnect();
+                }}
+            />
+
+            <ShortcutsHelp
+                isOpen={showShortcuts}
+                onClose={() => setShowShortcuts(false)}
+            />
+
+            <HighlightMenu
+                position={highlightMenuPos}
+                selectedText={highlightSelection}
+                synonyms={highlightSynonyms}
+                codexEntry={highlightCodexEntry}
+                onClose={() => setHighlightMenuPos(null)}
+                onViewCodex={(entry) => {
+                    setViewingLore(entry);
+                    setHighlightMenuPos(null);
+                }}
+                onReplace={(original, replacement) => {
+                    // This is a bit tricky with ContentEditable
+                    // For now, we'll try a simple replace on the active range if possible, or string replace
+                    const selection = window.getSelection();
+                    if (selection && selection.rangeCount > 0) {
+                        const range = selection.getRangeAt(0);
+                        range.deleteContents();
+                        range.insertNode(document.createTextNode(replacement));
+                        // Update React State
+                        if (editorRef.current) {
+                            setContent(editorRef.current.innerHTML);
+                        }
+                    }
+                    setHighlightMenuPos(null);
                 }}
             />
         </div >

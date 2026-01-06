@@ -5,7 +5,7 @@ interface StreakWidgetProps {
     streak: WritingStreak;
 }
 
-export const StreakWidget: React.FC<StreakWidgetProps> = ({ streak }) => {
+const StreakWidgetComponent: React.FC<StreakWidgetProps> = ({ streak }) => {
     if (streak.currentStreak === 0) return null;
 
     return (
@@ -44,3 +44,6 @@ export const StreakWidget: React.FC<StreakWidgetProps> = ({ streak }) => {
         </div>
     );
 };
+
+// Memoize to prevent unnecessary re-renders
+export const StreakWidget = React.memo(StreakWidgetComponent);

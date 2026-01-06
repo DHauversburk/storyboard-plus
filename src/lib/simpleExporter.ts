@@ -35,7 +35,7 @@ export const generateExport = (contentHtml: string, options: ExportOptions): Blo
             }
 
             // Convert HTML to simple Markdown
-            let md = contentHtml
+            const md = contentHtml
                 .replace(/<h1>(.*?)<\/h1>/gi, '# $1\n\n')
                 .replace(/<h2>(.*?)<\/h2>/gi, '## $1\n\n')
                 .replace(/<h3>(.*?)<\/h3>/gi, '### $1\n\n')

@@ -16,6 +16,7 @@ This roadmap outlines the planned features and improvements for StoryBoard Plus,
 - [x] **Typewriter Scrolling**: Keeps current line vertically centered.
 - [x] **Offline/Cloud Hybrid**: Offline capability with automatic reconnection syncing (Implemented Supabase + Dexie).
 - [x] **Enterprise Splash Screen**: Secure loading transition with system checks.
+- [x] **Smart Context Menu**: Usage-based highlighting for Definitions, Synonyms, and Codex entries.
 
 ## 2. Grammar & Mechanics (Proofreading)
 *Features focused on technical correctness.*

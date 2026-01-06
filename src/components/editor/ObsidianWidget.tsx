@@ -88,7 +88,7 @@ const FileTreeNode = ({ node, onPreview, depth = 0 }: { node: FileNode, onPrevie
     );
 };
 
-export function ObsidianWidget({ files, onConnect, onPreview }: { files: { name: string, content: string, path?: string }[], onConnect: () => void, onPreview: (f: { name: string, content: string }) => void }) {
+const ObsidianWidgetComponent = ({ files, onConnect, onPreview }: { files: { name: string, content: string, path?: string }[], onConnect: () => void, onPreview: (f: { name: string, content: string }) => void }) => {
     const [search, setSearch] = useState("");
 
     // If searching, show flat list. If not, show Tree.
@@ -174,3 +174,5 @@ export function ObsidianWidget({ files, onConnect, onPreview }: { files: { name:
         </div>
     );
 }
+
+export const ObsidianWidget = React.memo(ObsidianWidgetComponent);

@@ -6,7 +6,7 @@ interface HistoryState {
 }
 
 export const useEditorHistory = (initialContent: string) => {
-    const [history, setHistory] = useState<HistoryState[]>([
+    const [history, setHistory] = useState<HistoryState[]>(() => [
         { content: initialContent, timestamp: Date.now() }
     ]);
     const [currentIndex, setCurrentIndex] = useState(0);

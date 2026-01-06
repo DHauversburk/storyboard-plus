@@ -27,7 +27,7 @@ interface ProjectExplorerProps {
     onConnect: () => void;
 }
 
-export const ProjectExplorer: React.FC<ProjectExplorerProps> = ({
+export const ProjectExplorerComponent: React.FC<ProjectExplorerProps> = ({
     isVisible,
     isFocusMode,
     isLoading,
@@ -162,3 +162,7 @@ export const ProjectExplorer: React.FC<ProjectExplorerProps> = ({
         </nav>
     );
 };
+
+// Memoize to prevent unnecessary re-renders (especially with large file lists)
+const MemoizedProjectExplorer = React.memo(ProjectExplorerComponent);
+export { MemoizedProjectExplorer as ProjectExplorer };
