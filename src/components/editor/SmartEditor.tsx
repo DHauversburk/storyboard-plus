@@ -17,6 +17,7 @@ import { saveObsidianFiles, loadObsidianFiles, ObsidianFile } from '@/lib/obsidi
 import { ProjectExplorer } from './ProjectExplorer';
 import { EditorHeader } from './EditorHeader';
 import { StartScreen } from './StartScreen';
+import { OnboardingModal } from './OnboardingModal';
 import { DrivePickerModal } from './DrivePickerModal';
 import { CommandPalette } from './CommandPalette';
 import { StreakWidget } from './StreakWidget';
@@ -1515,6 +1516,15 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                     setShowDrivePicker(false);
                 }}
                 initialFolderId={currentDriveFolder}
+            />
+
+            {/* Onboarding Modal - First time user experience */}
+            <OnboardingModal
+                onComplete={() => setShowStartScreen(false)}
+                onConnectDrive={() => {
+                    setShowStartScreen(false);
+                    handleDriveConnect();
+                }}
             />
         </div >
     );
