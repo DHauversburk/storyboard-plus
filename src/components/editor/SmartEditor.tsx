@@ -1432,6 +1432,74 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                         </div>
                     </div>
 
+                    {/* Grammar & Mechanics Widget */}
+                    <div className="bg-card rounded-xl border border-white/5 p-4 flex-shrink-0">
+                        <h3 className="text-xs font-semibold text-gray-400 mb-3 uppercase tracking-wide flex items-center justify-between">
+                            <span>✍️ Grammar & Mechanics</span>
+                            {grammarIssues.length > 0 && (
+                                <span className="text-[10px] px-2 py-0.5 bg-yellow-500/20 text-yellow-400 rounded-full">
+                                    {grammarIssues.length}
+                                </span>
+                            )}
+                        </h3>
+                        <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar">
+                            {grammarIssues.length === 0 ? (
+                                <div className="text-xs text-gray-600 text-center py-4 flex flex-col items-center gap-2">
+                                    <span className="text-2xl">✅</span>
+                                    <span>No issues detected!</span>
+                                </div>
+                            ) : (
+                                grammarIssues.map((issue, idx) => (
+                                    <div key={issue.id || idx} className="p-3 bg-white/5 rounded-lg border border-white/10 space-y-2">
+                                        {/* Header */}
+                                        <div className="flex items-start justify-between gap-2">
+                                            <div className="flex items-center gap-2">
+                                                {/* Type Badge */}
+                                                <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-semibold uppercase ${issue.type === 'grammar' ? 'bg-red-500/20 text-red-400' :
+                                                        issue.type === 'style' ? 'bg-blue-500/20 text-blue-400' :
+                                                            issue.type === 'typo' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                                'bg-purple-500/20 text-purple-400'
+                                                    }`}>
+                                                    {issue.type}
+                                                </span>
+                                                {/* Severity Badge */}
+                                                {issue.severity === 'critical' && (
+                                                    <span className="text-[9px] px-1.5 py-0.5 bg-red-600/30 text-red-300 rounded-full font-semibold">
+                                                        ⚠️ CRITICAL
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* Message */}
+                                        <p className="text-xs text-gray-300 leading-relaxed">
+                                            {issue.message}
+                                        </p>
+
+                                        {/* Context */}
+                                        {issue.context && (
+                                            <div className="p-2 bg-black/30 rounded border border-white/5">
+                                                <p className="text-[11px] text-gray-400 font-mono">
+                                                    "{issue.context}"
+                                                </p>
+                                            </div>
+                                        )}
+
+                                        {/* Suggestion */}
+                                        {issue.suggestion && (
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-[10px] text-green-400">→</span>
+                                                <code className="text-[11px] text-green-400 bg-green-500/10 px-2 py-1 rounded">
+                                                    {issue.suggestion}
+                                                </code>
+                                            </div>
+                                        )}
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+
                     {/* Obsidian Sync Widget */}
                     <ObsidianWidget
                         files={obsidianFiles}
