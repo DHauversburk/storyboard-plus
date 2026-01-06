@@ -1,0 +1,1700 @@
+"use client";
+
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
+import { v4 as uuidv4 } from 'uuid';
+import { saveDraft, getDraft } from '@/lib/db';
+import { useDebounce } from '@/lib/hooks/useDebounce';
+import { useDictation } from '@/lib/hooks/useDictation';
+import { checkGrammarAndMechanics, GrammarIssue } from '@/lib/grammar';
+import { getDriveConfig, loadGoogleScripts, initializeGoogleApi, handleGoogleLogin, listFilesAndFolders, readDocumentContent, createDocument } from '@/lib/googleDrive';
+import { calculateReadingStats, generateEditorInsights, findContextMatches, analyzeSentenceLengths, analyzeParagraphPacing, getOverusedWords, analyzeSentimentArc, benchmarkGenre, GENRE_PROFILES, GenreType, BenchmarkResult } from '@/lib/analysis';
+import { ObsidianWidget } from './ObsidianWidget';
+import { saveObsidianFiles, loadObsidianFiles, ObsidianFile } from '@/lib/obsidianCodex';
+import { ProjectExplorer } from './ProjectExplorer';
+import { EditorHeader } from './EditorHeader';
+import { DrivePickerModal } from './DrivePickerModal';
+import { generateExport, downloadBlob } from '@/lib/simpleExporter';
+import { exportDocumentAsDocx, type DocxHeaderOptions, type FrontMatterOptions, type PageOptions } from '@/lib/exporter';
+
+interface SmartEditorProps {
+    initialContent?: string;
+    sceneId?: string;
+}
+
+export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) {
+    const [content, setContent] = useState(initialContent);
+    const [notes, setNotes] = useState("");
+    const [isScanning, setIsScanning] = useState(false);
+    const [detectedEntities, setDetectedEntities] = useState<string[]>([]);
+    const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error' | 'loading' | 'offline'>('loading');
+    const [draftId, setDraftId] = useState(sceneId || uuidv4());
+    const [activeFileId, setActiveFileId] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [isGoogleConnected, setIsGoogleConnected] = useState(false);
+    const [driveFiles, setDriveFiles] = useState<any[]>([]);
+    const [showDrivePicker, setShowDrivePicker] = useState(false);
+    const [currentDriveFolder, setCurrentDriveFolder] = useState('root');
+    const [currentFolderName, setCurrentFolderName] = useState('My Drive'); // New state for folder name
+    const [activeFileName, setActiveFileName] = useState<string | null>(null); // New state for file name
+    const [driveBreadcrumbs, setDriveBreadcrumbs] = useState<{ id: string, name: string }[]>([{ id: 'root', name: 'My Drive' }]);
+
+    // Debounce content and notes
+    const debouncedContent = useDebounce(content, 1500);
+    const debouncedNotes = useDebounce(notes, 1500);
+
+    // Initial Google Setup
+    useEffect(() => {
+        loadGoogleScripts().then(async () => {
+            const { apiKey, clientId } = getDriveConfig();
+            if (apiKey && clientId) {
+                try {
+                    await initializeGoogleApi(apiKey, clientId);
+                    // If we are initialized, we are "ready" to connect, but not necessarily signed in.
+                } catch (err) {
+                    console.warn("Failed to init Google API", err);
+                }
+            }
+        });
+    }, []);
+
+    const handleDriveConnect = () => {
+        const { apiKey, clientId } = getDriveConfig();
+        if (!apiKey || !clientId) {
+            alert("Please configure Google API Keys in Settings first!");
+            return;
+        }
+
+        try {
+            // Force re-auth to get new scopes if we changed them
+            handleGoogleLogin();
+            setIsGoogleConnected(true);
+        } catch (err) {
+            console.error(err);
+        }
+    };
+
+    const handleOpenFromDrive = async () => {
+        if (!isGoogleConnected) return;
+        setIsLoading(true);
+
+        let startFolderId = 'root';
+        let startFolderName = 'My Drive';
+
+        try {
+            const saved = localStorage.getItem('last_drive_folder');
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                startFolderId = parsed.id;
+                startFolderName = parsed.name;
+            }
+        } catch (e) {
+            console.warn("Failed to parse saved folder", e);
+        }
+
+        setCurrentFolderName(startFolderName); // Set initial folder name
+        // ... rest of init logic checks breadcrumbs ...
+
+        if (startFolderId !== 'root') {
+            setDriveBreadcrumbs([{ id: 'root', name: 'My Drive' }, { id: startFolderId, name: startFolderName }]);
+        } else {
+            setDriveBreadcrumbs([{ id: 'root', name: 'My Drive' }]);
+        }
+
+        const files = await listFilesAndFolders(startFolderId);
+        setDriveFiles(files || []);
+        setCurrentDriveFolder(startFolderId);
+        setIsLoading(false);
+        setShowStructure(true); // Open the Sidebar instead of Modal
+    };
+
+    const handleNavigateFolder = async (folderId: string, folderName: string) => {
+        setIsLoading(true);
+        const files = await listFilesAndFolders(folderId);
+        setDriveFiles(files || []);
+
+        setCurrentFolderName(folderName); // Update title
+
+        // Save logic
+        localStorage.setItem('last_drive_folder', JSON.stringify({ id: folderId, name: folderName }));
+
+        // Update breadcrumbs logic
+        const newBreadcrumbs = [...driveBreadcrumbs];
+        const existingIndex = newBreadcrumbs.findIndex(b => b.id === folderId);
+
+        if (existingIndex >= 0) {
+            setDriveBreadcrumbs(newBreadcrumbs.slice(0, existingIndex + 1));
+        } else {
+            setDriveBreadcrumbs([...newBreadcrumbs, { id: folderId, name: folderName }]);
+        }
+
+        setCurrentDriveFolder(folderId);
+        setIsLoading(false);
+    };
+
+    const [showStructure, setShowStructure] = useState(true); // Default open
+    const [showTools, setShowTools] = useState(true); // Default open
+    const [isFocusMode, setIsFocusMode] = useState(false); // Distraction Free
+    const [docStructure, setDocStructure] = useState<{ title: string, tabs: { id: string, title: string, content: string }[] } | null>(null);
+
+    // --- Appearance State ---
+    const [fontSize, setFontSize] = useState(18);
+    const [fontFamily, setFontFamily] = useState('Merriweather');
+    const [deviceMode, setDeviceMode] = useState<'none' | 'mobile' | 'tablet' | 'ereader'>('none');
+    const [headerOptions, setHeaderOptions] = useState<DocxHeaderOptions>({
+        style: 'simple',
+        alignment: 'center',
+        uppercase: true,
+        showChapterNumber: false,
+        customText: ''
+    });
+    const [frontMatterOptions, setFrontMatterOptions] = useState<FrontMatterOptions>({
+        includeTOC: false,
+        includeCopyright: false,
+        dedication: ''
+    });
+    const [pageOptions, setPageOptions] = useState<PageOptions>({
+        size: 'Letter',
+        margins: 'Normal'
+    });
+    const editorRef = React.useRef<HTMLDivElement>(null);
+
+    // --- Goal Tracking State ---
+    const [dailyGoal, setDailyGoal] = useState(500); // Words per session goal
+    const [sessionStartWords, setSessionStartWords] = useState(0); // Words at session start
+    const [goalEnabled, setGoalEnabled] = useState(true);
+
+    // Load goal preferences from localStorage
+    useEffect(() => {
+        const savedGoal = localStorage.getItem('sb_dailyGoal');
+        const savedEnabled = localStorage.getItem('sb_goalEnabled');
+        if (savedGoal) setDailyGoal(parseInt(savedGoal, 10));
+        if (savedEnabled !== null) setGoalEnabled(savedEnabled === 'true');
+    }, []);
+
+    // Save goal preferences to localStorage
+    useEffect(() => {
+        localStorage.setItem('sb_dailyGoal', String(dailyGoal));
+        localStorage.setItem('sb_goalEnabled', String(goalEnabled));
+    }, [dailyGoal, goalEnabled]);
+
+    // Session tracking moved after stats declaration
+
+    const sessionInitialized = React.useRef(false);
+
+    // --- Typewriter Scrolling ---
+    const [typewriterMode, setTypewriterMode] = useState(false);
+
+    // --- Export ---
+    const [showExportMenu, setShowExportMenu] = useState(false);
+
+    // --- Genre Analysis ---
+    const [selectedGenre, setSelectedGenre] = useState<GenreType>('Thriller');
+    const [genreResults, setGenreResults] = useState<BenchmarkResult[]>([]);
+
+
+
+    // --- Dictation ---
+    const { isListening, transcript, resetTranscript, startListening, stopListening } = useDictation();
+
+    // --- Grammar Analysis ---
+    const [grammarIssues, setGrammarIssues] = useState<GrammarIssue[]>([]);
+
+    // Check grammar on content change
+    useEffect(() => {
+        if (!debouncedContent) return;
+        const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        // Run lightly
+        const issues = checkGrammarAndMechanics(plainText);
+        setGrammarIssues(issues);
+    }, [debouncedContent]);
+
+    // Effect to insert dictated text
+    useEffect(() => {
+        if (transcript && editorRef.current) {
+            editorRef.current.focus();
+            // Use execCommand to insert at cursor position - deprecated but reliable for this
+            document.execCommand('insertText', false, transcript + ' ');
+            resetTranscript();
+        }
+    }, [transcript, resetTranscript]);
+
+    useEffect(() => {
+        if (!debouncedContent) return;
+        const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (plainText.length > 100) {
+            setGenreResults(benchmarkGenre(plainText, selectedGenre));
+        }
+    }, [debouncedContent, selectedGenre]);
+
+    // Load typewriter preference from localStorage
+    useEffect(() => {
+        const savedTypewriter = localStorage.getItem('sb_typewriterMode');
+        if (savedTypewriter !== null) setTypewriterMode(savedTypewriter === 'true');
+    }, []);
+
+    // Save typewriter preference
+    useEffect(() => {
+        localStorage.setItem('sb_typewriterMode', String(typewriterMode));
+    }, [typewriterMode]);
+
+    // Scroll to keep cursor centered when typewriter mode is on
+    const scrollToCursor = useCallback(() => {
+        if (!typewriterMode || !editorRef.current) return;
+
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return;
+
+        const range = selection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        const editorRect = editorRef.current.getBoundingClientRect();
+
+        // Calculate the target scroll position to center the cursor
+        const centerOffset = editorRect.height / 2;
+        const cursorRelativeTop = rect.top - editorRect.top + editorRef.current.scrollTop;
+        const targetScroll = cursorRelativeTop - centerOffset;
+
+        editorRef.current.scrollTo({
+            top: Math.max(0, targetScroll),
+            behavior: 'smooth'
+        });
+    }, [typewriterMode]);
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.ctrlKey || e.metaKey) {
+            if (e.key === 'b') {
+                e.preventDefault();
+                document.execCommand('bold', false);
+            } else if (e.key === 'i') {
+                e.preventDefault();
+                document.execCommand('italic', false);
+            } else if (e.key === 'u') {
+                e.preventDefault();
+                document.execCommand('underline', false);
+            }
+        }
+    };
+
+    const handleEditorInput = () => {
+        if (editorRef.current) {
+            const html = editorRef.current.innerHTML;
+            // Convert HTML to plain text for stats/analysis (strip tags), but store the HTML
+            setContent(html);
+            if (saveStatus === 'saved') setSaveStatus('saving');
+            // Typewriter scroll
+            scrollToCursor();
+        }
+    };
+
+    // Sync content to editor when loaded from external source (Drive, Draft)
+    // Use a ref to track if we're the source of the change
+    const isExternalUpdate = React.useRef(false);
+
+    useEffect(() => {
+        // Only update the editor DOM if the content was NOT changed by user typing
+        // (i.e., when loading a file or switching files)
+        if (editorRef.current && isExternalUpdate.current) {
+            editorRef.current.innerHTML = content || '';
+            isExternalUpdate.current = false;
+        }
+    }, [content]);
+
+    // Helper to set content from external sources
+    const setContentExternal = useCallback((newContent: string) => {
+        isExternalUpdate.current = true;
+        setContent(newContent);
+    }, []);
+
+    // ... (rest of useEffects)
+
+    const [obsidianFiles, setObsidianFiles] = useState<ObsidianFile[]>([]);
+    const [viewingLore, setViewingLore] = useState<{ name: string, content: string } | null>(null);
+
+    // Load saved Obsidian files on mount
+    useEffect(() => {
+        const savedFiles = loadObsidianFiles();
+        if (savedFiles.length > 0) {
+            setObsidianFiles(savedFiles);
+        }
+    }, []);
+
+    const handleObsidianConnect = async () => {
+        try {
+            // @ts-ignore - File System Access API
+            const dirHandle = await window.showDirectoryPicker();
+
+            const files: { name: string, content: string, path?: string }[] = [];
+
+            // Recursive scanner function
+            // @ts-ignore
+            async function scanDir(handle, path = "") {
+                // @ts-ignore
+                for await (const entry of handle.values()) {
+                    const currentPath = path ? `${path}/${entry.name}` : entry.name;
+
+                    if (entry.kind === 'file' && entry.name.endsWith('.md')) {
+                        const file = await entry.getFile();
+                        const text = await file.text();
+                        // Store path for better display
+                        files.push({ name: entry.name, content: text, path: currentPath });
+                    } else if (entry.kind === 'directory') {
+                        // Recurse up to limit - increased to 500
+                        if (files.length < 500) await scanDir(entry, currentPath);
+                    }
+                }
+            }
+
+            // @ts-ignore
+            await scanDir(dirHandle);
+
+            setObsidianFiles(files as ObsidianFile[]);
+            saveObsidianFiles(files as ObsidianFile[]); // Save to localStorage for cross-page access
+            alert(`Connected! Found ${files.length} markdown notes. Characters and World Bible will auto-populate.`);
+
+        } catch (err) {
+            console.warn("Vault connection cancelled or failed", err);
+        }
+    };
+
+    const handleSelectDriveFile = async (fileId: string, fileName: string) => {
+        try {
+            setIsLoading(true);
+            setActiveFileId(fileId);
+            setDraftId(fileId); // This triggers the useEffect below to load Notes for this file
+            setActiveFileName(fileName);
+
+            console.log(`[SmartEditor] Opening Drive File: ${fileName} (${fileId})`);
+
+            // 1. Fetch content using our library function
+            // This function handles the Google API internals
+            const result: any = await readDocumentContent(fileId);
+
+            let loadedContent = "";
+
+            // Handle potential return types (string or object with tabs)
+            if (typeof result === 'object' && result.content) {
+                loadedContent = result.content;
+                // If the API helper found tabs, use them
+                if (result.tabs && result.tabs.length > 0) {
+                    setDocStructure({ title: result.title || fileName, tabs: result.tabs });
+                }
+            } else if (typeof result === 'string') {
+                loadedContent = result;
+            }
+
+            setContentExternal(loadedContent);
+
+            // --- AUTO-DETECT STRUCTURE (Fallback) ---
+            // If the API didn't give us tabs, try to parse headings manually
+            if ((!docStructure || !docStructure.tabs || docStructure.tabs.length === 0) && loadedContent) {
+                // Regex: Look for lines starting with "Chapter", "Act", "Part", or "Book" followed by a number or title
+                const structureRegex = /^(Chapter|Act|Part|Book)\s+\d+/gim;
+                const lines = loadedContent.split('\n');
+                const tabs: { id: string, title: string, content: string }[] = [];
+
+                let currentTab = { id: 'main', title: 'Main', content: '' };
+                let buffer = '';
+
+                lines.forEach((line) => {
+                    const match = line.match(structureRegex);
+                    // If we hit a new section and the buffer has substantial content
+                    if (match && buffer.length > 50) {
+                        // Save previous
+                        tabs.push({ ...currentTab, content: buffer });
+
+                        // Start new
+                        buffer = line + '\n';
+                        currentTab = {
+                            id: uuidv4(),
+                            title: match[0].trim().substring(0, 20), // Truncate title
+                            content: ''
+                        };
+                    } else {
+                        buffer += line + '\n';
+                    }
+                });
+
+                // Push final
+                tabs.push({ ...currentTab, content: buffer });
+
+                if (tabs.length > 1) {
+                    setDocStructure({ title: fileName, tabs });
+                    setShowStructure(true); // Open the left sidebar to show context if desired, or just rely on top tabs
+                }
+            }
+
+            setShowDrivePicker(false);
+        } catch (error) {
+            console.error("Error opening file:", error);
+            // Fallback for demo if API fails entirely
+            setContentExternal(`# Error Loading File\n\nCould not fetch content for ${fileName}. Ensure you are logged in.`);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    // Load draft when draftId changes (switching files)
+    useEffect(() => {
+        const load = async () => {
+            try {
+                // 1. Try Loading from Manuscript Scenes (Priority 1)
+                const savedScenes = localStorage.getItem('sb_scenes');
+                if (savedScenes) {
+                    const scenes = JSON.parse(savedScenes);
+                    const scene = scenes.find((s: any) => s.id === draftId);
+                    if (scene) {
+                        console.log(`[SmartEditor] Loaded Scene: ${scene.title}`);
+                        setContentExternal(scene.content || "");
+                        setActiveFileName(scene.title);
+                        setNotes(""); // Scenes might store notes separately later
+                        setSaveStatus('saved');
+                        setIsLoading(false);
+                        return;
+                    }
+                }
+
+                // 2. Fallback to IndexedDB Drafts
+                const draft = await getDraft(draftId);
+                // If we found a local draft for this specific ID, load its notes 
+                if (draft) {
+                    console.log(`[SmartEditor] Loaded notes for draft: ${draft.id}`);
+                    setNotes(draft.notes || "");
+
+                    // Only overwrite content from local DB if we are NOT in "Connected Mode" (activeFileId is null)
+                    if (!activeFileId && draft.content) {
+                        setContentExternal(draft.content);
+                    }
+                } else {
+                    setNotes("");
+                }
+            } catch (err) {
+                console.error("Failed to load draft", err);
+            } finally {
+                if (!activeFileId) setIsLoading(false);
+                setSaveStatus('saved');
+            }
+        };
+        load();
+    }, [draftId]); // Depend on draftId changes
+
+    // Auto-save effect
+    useEffect(() => {
+        // Check if NOT loading to prevent overwriting with empty state
+        if (!isLoading) {
+            const performSave = async () => {
+                setSaveStatus('saving');
+
+                // 1. Save to IndexedDB & Cloud (Hybrid)
+                const isSynced = await saveDraft({
+                    id: draftId,
+                    projectId: 'project-alpha',
+                    chapterId: 'chapter-1',
+                    title: activeFileName || 'Untitled Scene',
+                    content: debouncedContent,
+                    notes: debouncedNotes,
+                    lastModified: Date.now(),
+                    version: 1,
+                });
+
+                // 2. Sync to Manuscript Scenes (Main Storage)
+                const savedScenes = localStorage.getItem('sb_scenes');
+                if (savedScenes) {
+                    const scenes = JSON.parse(savedScenes);
+                    const sceneIdx = scenes.findIndex((s: any) => s.id === draftId);
+                    if (sceneIdx !== -1) {
+                        const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                        scenes[sceneIdx].content = debouncedContent;
+                        scenes[sceneIdx].wordCount = plainText.length > 0 ? plainText.split(/\s+/).length : 0;
+                        scenes[sceneIdx].lastModified = Date.now();
+                        localStorage.setItem('sb_scenes', JSON.stringify(scenes));
+                    }
+                }
+
+                setTimeout(() => setSaveStatus(isSynced ? 'saved' : 'offline'), 500);
+            };
+            performSave();
+        }
+    }, [debouncedContent, debouncedNotes, draftId, isLoading, activeFileName]);
+
+    // --- Helper for Loading Folder ---
+    const handleLoadFolder = async () => {
+        // Filter adaptable files
+        const validFiles = driveFiles.filter(f =>
+            f.mimeType !== 'application/vnd.google-apps.folder' &&
+            !f.name.endsWith('.pdf') // Exclude PDFs for now as they might not be editable text
+        ); // Closing parenthesis for filter
+        if (validFiles.length > 0) {
+            // Open the first file immediately
+            await handleSelectDriveFile(validFiles[0].id, validFiles[0].name);
+            // In a real app, we might also batch-fetch the content of others here 
+            // to populate 'projectFiles' state for analysis.
+        }
+    };
+
+    // --- Expert Editor State ---
+    const [editorInsights, setEditorInsights] = useState<{ type: 'warning' | 'suggestion' | 'praise', message: string, context: string }[]>([]);
+    const [activeContext, setActiveContext] = useState<{ name: string, content: string }[]>([]);
+
+    const handleScan = () => {
+        setIsScanning(true);
+        setTimeout(() => {
+            const plainText = debouncedContent.replace(/<[^>]*>/g, '');
+            const newInsights = generateEditorInsights(plainText);
+            setEditorInsights(newInsights);
+            setIsScanning(false);
+            if (!showTools) setShowTools(true);
+        }, 800);
+    };
+
+    // Helper to strip HTML for analysis
+    const getPlainText = useCallback((html: string) => {
+        return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    }, []);
+
+    const stats = useMemo(() => {
+        const plainText = getPlainText(debouncedContent);
+        return calculateReadingStats(plainText);
+    }, [debouncedContent, getPlainText]);
+
+    // Track session start word count (set once when content first loads with words)
+    useEffect(() => {
+        if (!sessionInitialized.current && stats?.wordCount && stats.wordCount > 0) {
+            setSessionStartWords(stats.wordCount);
+            sessionInitialized.current = true;
+        }
+    }, [stats?.wordCount]);
+
+    // Calculate session progress
+    const sessionWordsWritten = (stats?.wordCount || 0) - sessionStartWords;
+    const goalProgress = goalEnabled && dailyGoal > 0 ? Math.min(100, (sessionWordsWritten / dailyGoal) * 100) : 0;
+
+    // Auto-scan context
+    useEffect(() => {
+        if (debouncedContent) {
+            const plainText = getPlainText(debouncedContent);
+            const matches = findContextMatches(plainText, obsidianFiles);
+            setActiveContext(matches);
+        }
+    }, [debouncedContent, obsidianFiles, getPlainText]);
+
+    const handleSaveToDrive = async () => {
+        if (!isGoogleConnected) {
+            alert('Please connect to Google Drive first (Folders Icon -> Connect).');
+            return;
+        }
+
+        try {
+            const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').trim();
+            const { createDocument, updateDocument } = await import('@/lib/googleDrive');
+
+            if (activeFileId) {
+                await updateDocument(activeFileId, plainText);
+                alert('Saved changes to existing Google Doc!');
+            } else {
+                const newId = await createDocument(activeFileName || 'Untitled Draft', plainText);
+                if (newId) {
+                    setActiveFileId(newId);
+                    alert('Created new Google Doc!');
+                }
+            }
+
+        } catch (err) {
+            console.error(err);
+            alert('Failed to save to Drive. Check console.');
+        }
+    };
+
+    return (
+        <div className="flex h-full w-full overflow-hidden relative">
+
+            {/* --- LEFT COLUMN: Project Explorer --- */}
+            <ProjectExplorer
+                isVisible={showStructure}
+                isFocusMode={isFocusMode}
+                isLoading={isLoading}
+                driveFiles={driveFiles}
+                activeFileId={activeFileId}
+                currentDriveFolder={currentDriveFolder}
+                currentFolderName={currentFolderName}
+                driveBreadcrumbs={driveBreadcrumbs}
+                onNavigateFolder={handleNavigateFolder}
+                onSelectFile={handleSelectDriveFile}
+                onLoadFolder={handleLoadFolder}
+                onOpenPicker={() => setShowDrivePicker(true)}
+            />
+
+            {/* --- MIDDLE COLUMN: Main Writing Area --- */}
+            <div className="flex-1 flex flex-col h-full bg-card relative overflow-hidden">
+
+                {/* Header Row 1 & 2: Replaced by EditorHeader */}
+                <EditorHeader
+                    isFocusMode={isFocusMode}
+                    currentFolderName={currentFolderName}
+                    activeFileName={activeFileName}
+                    saveStatus={saveStatus}
+                    showStructure={showStructure}
+                    onToggleStructure={() => setShowStructure(!showStructure)}
+                    stats={stats}
+                    goalEnabled={goalEnabled}
+                    dailyGoal={dailyGoal}
+                    sessionWordsWritten={sessionWordsWritten}
+                    goalProgress={goalProgress}
+                    onSetFocusMode={setIsFocusMode}
+                    showExportMenu={showExportMenu}
+                    onToggleExportMenu={() => setShowExportMenu(!showExportMenu)}
+                    exportContext={{
+                        content: debouncedContent,
+                        fileName: activeFileName || 'Untitled',
+                        stats: stats,
+                        headerOptions,
+                        frontMatterOptions,
+                        pageOptions,
+                        setPageOptions
+                    }}
+                    isListening={isListening}
+                    onToggleDictation={isListening ? stopListening : startListening}
+                    isScanning={isScanning}
+                    onRunAnalysis={handleScan}
+                    showTools={showTools}
+                    onToggleTools={() => setShowTools(!showTools)}
+                    onSaveToDrive={handleSaveToDrive}
+                    docStructure={docStructure}
+                    onTabSelect={setContentExternal}
+                />
+
+                {/* Header Row 2: Analytics & Controls (The "Grey Bar") */}
+                {!isFocusMode && (
+                    <div className="flex flex-col border-b border-white/5 bg-white/5 relative z-20 shadow-sm">
+                        <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 p-2">
+                            {/* Left Toggle */}
+                            <button
+                                onClick={() => setShowStructure(!showStructure)}
+                                className={`p-2 rounded-lg transition-all ${showStructure ? 'text-purple-300 bg-purple-500/10' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+                                title="Toggle Project Explorer"
+                            >
+                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+                            </button>
+
+                            {/* Center Area: Stats Only (No Title) */}
+                            <div className="flex items-center justify-between w-full max-w-5xl mx-auto px-4">
+
+                                {/* LEFT STATS */}
+                                <div className="flex items-center gap-10">
+                                    <div className="flex flex-col items-start space-y-0.5">
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Words</span>
+                                        <span className="text-white text-base font-bold font-mono">{stats?.wordCount || 0}</span>
+                                    </div>
+                                    <div className="h-8 w-px bg-white/10" />
+                                    <div className="flex flex-col items-start space-y-0.5">
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Read Time</span>
+                                        <span className="text-white text-base font-bold font-mono">{stats ? Math.ceil(stats.wordCount / 250) + 'm' : '-'}</span>
+                                    </div>
+                                    <div className="h-8 w-px bg-white/10" />
+                                    <div className="flex flex-col items-start space-y-0.5">
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Grade</span>
+                                        <span className={`text-base font-bold font-mono ${Number(stats?.fkGrade) > 12 ? 'text-yellow-400' : 'text-white'}`}>{stats?.fkGrade || '-'}</span>
+                                    </div>
+                                </div>
+
+                                {/* SESSION GOAL PROGRESS */}
+                                {goalEnabled && (
+                                    <div className="flex flex-col items-center gap-1 px-4">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Session</span>
+                                            <span className={`text-xs font-bold font-mono ${goalProgress >= 100 ? 'text-green-400' : 'text-purple-300'}`}>
+                                                {sessionWordsWritten}/{dailyGoal}
+                                            </span>
+                                        </div>
+                                        <div className="w-24 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                                            <div
+                                                className={`h-full transition-all duration-500 rounded-full ${goalProgress >= 100 ? 'bg-green-500' : 'bg-gradient-to-r from-purple-500 to-pink-500'}`}
+                                                style={{ width: `${goalProgress}%` }}
+                                            />
+                                        </div>
+                                        {goalProgress >= 100 && (
+                                            <span className="text-[9px] text-green-400 animate-pulse">🎉 Goal Met!</span>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* RIGHT STATS */}
+                                <div className="flex items-center gap-10">
+                                    <div className="flex flex-col items-end space-y-0.5">
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Narratability</span>
+                                        <span className={`text-base font-bold font-mono ${Number(stats?.stdDev) > 5 ? 'text-green-400' : 'text-yellow-400'}`}>{stats?.stdDev || '-'}</span>
+                                    </div>
+                                    <div className="h-8 w-px bg-white/10" />
+                                    <div className="flex flex-col items-end space-y-0.5">
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Pacing</span>
+                                        <span className="text-white text-base font-bold font-mono">{stats?.pacingScore || '-'}</span>
+                                    </div>
+                                    <div className="h-8 w-px bg-white/10" />
+                                    <div className="flex flex-col items-end space-y-0.5">
+                                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Adverbs</span>
+                                        <span className={`text-base font-bold font-mono ${(stats?.adverbCount || 0) > 15 ? 'text-red-400' : 'text-white'}`}>{stats?.adverbCount || 0}</span>
+                                    </div>
+
+                                    {/* Focus Mode Trigger */}
+                                    <button
+                                        onClick={() => setIsFocusMode(true)}
+                                        title="Enter Focus Mode"
+                                        className="ml-6 p-2 rounded-full hover:bg-white/10 text-gray-400 hover:text-white transition-all flex-shrink-0"
+                                    >
+                                        <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                                    </button>
+
+                                    {/* Export Dropdown */}
+                                    <div className="relative">
+                                        <button
+                                            onClick={() => setShowExportMenu(!showExportMenu)}
+                                            title="Export"
+                                            className="ml-2 p-2 rounded-full hover:bg-white/10 text-gray-400 hover:text-white transition-all flex-shrink-0"
+                                        >
+                                            <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                        </button>
+
+                                        {showExportMenu && (
+                                            <div className="absolute top-full right-0 mt-2 w-48 bg-gray-800 border border-white/10 rounded-lg shadow-xl py-2 z-50">
+                                                <div className="px-3 py-1 text-[10px] font-bold text-gray-500 uppercase">Export As</div>
+
+                                                <button
+                                                    onClick={() => {
+                                                        const blob = generateExport(debouncedContent, {
+                                                            format: 'markdown',
+                                                            title: activeFileName || 'Untitled',
+                                                            author: 'Author',
+                                                            includeTitlePage: true,
+                                                            includeStats: true,
+                                                            stats: stats ? { words: stats.wordCount, chars: 0, readTime: stats.readTimeMinutes || 0 } : undefined
+                                                        });
+                                                        downloadBlob(blob, `${activeFileName || 'Draft'}.md`);
+                                                        setShowExportMenu(false);
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-white/5 flex items-center gap-2"
+                                                >
+                                                    📝 Markdown (.md)
+                                                </button>
+
+                                                <button
+                                                    onClick={() => {
+                                                        const blob = generateExport(debouncedContent, {
+                                                            format: 'txt',
+                                                            title: activeFileName || 'Untitled',
+                                                            author: 'Author',
+                                                            includeTitlePage: true,
+                                                            includeStats: true,
+                                                            stats: stats ? { words: stats.wordCount, chars: 0, readTime: stats.readTimeMinutes || 0 } : undefined
+                                                        });
+                                                        downloadBlob(blob, `${activeFileName || 'Draft'}.txt`);
+                                                        setShowExportMenu(false);
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-white/5 flex items-center gap-2"
+                                                >
+                                                    📄 Plain Text (.txt)
+                                                </button>
+
+                                                <div className="my-1 border-t border-white/5" />
+
+                                                <button
+                                                    onClick={async () => {
+                                                        const url = localStorage.getItem('webhook_url');
+                                                        if (!url) {
+                                                            alert('No Webhook URL configured! Go to Settings.');
+                                                            return;
+                                                        }
+
+                                                        try {
+                                                            const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').trim();
+                                                            await fetch(url, {
+                                                                method: 'POST',
+                                                                headers: { 'Content-Type': 'application/json' },
+                                                                body: JSON.stringify({
+                                                                    event: 'scene_export',
+                                                                    title: activeFileName || 'Untitled',
+                                                                    content: plainText,
+                                                                    wordCount: stats?.wordCount,
+                                                                    timestamp: new Date().toISOString()
+                                                                })
+                                                            });
+                                                            alert('Successfully sent to Webhook!');
+                                                        } catch (err) {
+                                                            alert('Failed to send: ' + (err as Error).message);
+                                                        }
+                                                        setShowExportMenu(false);
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-sm text-purple-300 hover:bg-purple-500/10 flex items-center gap-2"
+                                                >
+                                                    🚀 Send to Webhook
+                                                </button>
+
+                                                <button
+                                                    onClick={async () => {
+                                                        if (!isGoogleConnected) {
+                                                            alert('Please connect to Google Drive first (Folders Icon -> Connect).');
+                                                            return;
+                                                        }
+
+                                                        try {
+                                                            const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').trim();
+                                                            // We need to import updateDocument/createDocument at the top, but for now assuming it's imported or will be handled.
+                                                            // Actually I need to update imports.
+
+                                                            // Simplistic Logic:
+                                                            // If we have an activeFileId, we UPDATE it.
+                                                            // If NOT, we CREATE a new one.
+
+                                                            const { createDocument, updateDocument } = await import('@/lib/googleDrive');
+
+                                                            if (activeFileId) {
+                                                                await updateDocument(activeFileId, plainText);
+                                                                alert('Saved changes to existing Google Doc!');
+                                                            } else {
+                                                                const newId = await createDocument(activeFileName || 'Untitled Draft', plainText);
+                                                                if (newId) {
+                                                                    setActiveFileId(newId); // Now bound
+                                                                    alert('Created new Google Doc!');
+                                                                    // Ideally refresh file list here too
+                                                                }
+                                                            }
+
+                                                        } catch (err) {
+                                                            console.error(err);
+                                                            alert('Failed to save to Drive. Check console.');
+                                                        }
+                                                        setShowExportMenu(false);
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-sm text-green-300 hover:bg-green-500/10 flex items-center gap-2"
+                                                >
+                                                    💾 Save to Google Drive
+                                                </button>
+
+                                                <button
+                                                    onClick={() => {
+                                                        const blob = generateExport(debouncedContent, {
+                                                            format: 'html',
+                                                            title: activeFileName || 'Untitled',
+                                                            author: 'Author',
+                                                            includeTitlePage: true,
+                                                            includeStats: true,
+                                                            stats: stats ? { words: stats.wordCount, chars: 0, readTime: stats.readTimeMinutes || 0 } : undefined
+                                                        });
+                                                        downloadBlob(blob, `${activeFileName || 'Draft'}.html`);
+                                                        setShowExportMenu(false);
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-white/5 flex items-center gap-2"
+                                                >
+                                                    🌏 HTML (.html)
+                                                </button>
+
+                                                <div className="px-3 py-2 bg-black/20 rounded mb-2 space-y-2">
+                                                    <div className="text-[10px] uppercase font-bold text-gray-500">Print Layout</div>
+                                                    <div className="grid grid-cols-2 gap-2">
+                                                        <select
+                                                            className="bg-black/40 text-xs text-gray-300 border border-white/10 rounded px-1 py-1 outline-none"
+                                                            value={pageOptions.size}
+                                                            onChange={e => setPageOptions(prev => ({ ...prev, size: e.target.value as any }))}
+                                                        >
+                                                            <option value="Letter">Letter (8.5x11)</option>
+                                                            <option value="A4">A4</option>
+                                                            <option value="6x9">6x9 (Trade)</option>
+                                                            <option value="5x8">5x8 (Pocket)</option>
+                                                        </select>
+                                                        <select
+                                                            className="bg-black/40 text-xs text-gray-300 border border-white/10 rounded px-1 py-1 outline-none"
+                                                            value={pageOptions.margins}
+                                                            onChange={e => setPageOptions(prev => ({ ...prev, margins: e.target.value as any }))}
+                                                        >
+                                                            <option value="Normal">Normal (1")</option>
+                                                            <option value="Narrow">Narrow (0.5")</option>
+                                                            <option value="Wide">Wide (2")</option>
+                                                            <option value="Mirrored">Mirrored</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+
+                                                <button
+                                                    onClick={() => {
+                                                        exportDocumentAsDocx(
+                                                            activeFileName || 'Untitled',
+                                                            'Author',
+                                                            debouncedContent,
+                                                            stats ? { words: stats.wordCount } : undefined,
+                                                            headerOptions,
+                                                            frontMatterOptions,
+                                                            pageOptions
+                                                        );
+                                                        setShowExportMenu(false);
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-white/5 flex items-center gap-2"
+                                                >
+                                                    📄 Word (.docx)
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Dictation Trigger */}
+                                    <button
+                                        onClick={isListening ? stopListening : startListening}
+                                        title={isListening ? "Stop Dictation" : "Start Dictation"}
+                                        className={`ml-2 p-2 rounded-full transition-all flex-shrink-0 ${isListening ? 'bg-red-500/20 text-red-500 animate-pulse border border-red-500/30' : 'hover:bg-white/10 text-gray-400 hover:text-white'}`}
+                                    >
+                                        <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
+                                    </button>
+
+                                    {/* Deep Analysis Trigger */}
+                                    <button
+                                        onClick={handleScan}
+                                        title="Run Deep Analysis"
+                                        className="ml-2 p-2 rounded-full bg-purple-500/20 hover:bg-purple-500/40 text-purple-300 hover:text-white transition-all flex-shrink-0 border border-purple-500/30 shadow-[0_0_10px_rgba(168,85,247,0.2)]"
+                                    >
+                                        <svg className={`w-5 h-5 ${isScanning ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Right Toggle */}
+                            <button
+                                onClick={() => setShowTools(!showTools)}
+                                className={`p-2 rounded-lg transition-all ${showTools ? 'text-purple-300 bg-purple-500/10' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+                                title="Toggle Tools"
+                            >
+                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                            </button>
+                        </div>
+
+                        {/* Toolbar / Tabs Row */}
+                        <div className="flex items-center justify-between px-4 pb-2 text-xs">
+                            <div className="flex items-center gap-2">
+                                {/* Doc Tabs (Acts/Chapters) */}
+                                {docStructure && docStructure.tabs.length > 0 ? (
+                                    <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap custom-scrollbar max-w-[50vw]">
+                                        {docStructure.tabs.map(tab => (
+                                            <button
+                                                key={tab.id}
+                                                onClick={() => setContentExternal(tab.content)}
+                                                className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded-full text-gray-400 hover:text-white border border-white/5 transition-colors"
+                                            >
+                                                {tab.title}
+                                            </button>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <span className="text-gray-600 italic pl-1">Main Document</span>
+                                )}
+                            </div>
+
+                            <div className="flex items-center gap-4">
+                                <span className={`transition-colors duration-300 ${saveStatus === 'saving' ? 'text-yellow-500' : 'text-green-500/50'}`}>
+                                    {saveStatus === 'saving' ? 'Saving...' : 'Saved'}
+                                </span>
+                                <span className="text-gray-600">
+                                    {stats?.wordCount || 0} words
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Editor Textarea */}
+                <div className="flex-1 relative group">
+                    {/* Floating Exit Focus Button */}
+                    {isFocusMode && (
+                        <button
+                            onClick={() => setIsFocusMode(false)}
+                            className="absolute top-4 right-8 z-50 p-2 bg-black/50 hover:bg-black/80 rounded-full text-gray-500 hover:text-white transition-all opacity-0 group-hover:opacity-100 backdrop-blur-sm shadow-xl border border-white/10"
+                            title="Exit Focus Mode"
+                        >
+                            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                    )}
+
+                    <div
+                        ref={editorRef}
+                        contentEditable
+                        suppressContentEditableWarning
+                        className="w-full h-full bg-transparent p-6 md:p-8 outline-none text-gray-200 custom-scrollbar max-w-6xl mx-auto block leading-relaxed transition-all overflow-y-auto"
+                        onKeyDown={handleKeyDown}
+                        onInput={handleEditorInput}
+                        spellCheck={true}
+                        data-placeholder="Start writing your masterpiece..."
+                        style={{
+                            fontSize: `${fontSize}px`,
+                            fontFamily: fontFamily.includes(' ') ? `"${fontFamily}", serif` : `${fontFamily}, serif`,
+                            minHeight: '100%',
+                            whiteSpace: 'pre-wrap',
+                            wordWrap: 'break-word',
+                            maxWidth: deviceMode === 'none' ? undefined : deviceMode === 'mobile' ? '375px' : deviceMode === 'tablet' ? '768px' : '550px',
+                            backgroundColor: deviceMode === 'ereader' ? '#fdf6e3' : deviceMode !== 'none' ? '#1e1e1e' : undefined, // Kindle Paperwhite-ish vs Dark Device
+                            color: deviceMode === 'ereader' ? '#333' : undefined,
+                            border: deviceMode !== 'none' ? '12px solid #333' : undefined,
+                            borderRadius: deviceMode !== 'none' ? '24px' : undefined,
+                            padding: deviceMode !== 'none' ? '2rem 1.5rem' : undefined,
+                            margin: '0 auto',
+                            boxShadow: deviceMode !== 'none' ? '0 25px 50px -12px rgba(0, 0, 0, 0.5)' : undefined
+                        }}
+                    />
+                </div>
+            </div>
+
+            {/* --- RIGHT COLUMN: Tools & Context --- */}
+            <div
+                className={`flex-shrink-0 bg-card border-l border-white/5 flex flex-col transition-all duration-300 ease-in-out ${showTools ? 'w-80 opacity-100' : 'w-0 opacity-0 overflow-hidden'}`}
+            >
+                <div className="p-4 flex flex-col gap-4 overflow-y-auto h-full pr-2 custom-scrollbar min-w-[20rem]">
+
+                    {/* Appearance Widget */}
+                    <div className="bg-card rounded-xl border border-white/5 flex flex-col overflow-hidden shadow-sm flex-shrink-0">
+                        <div className="p-3 bg-white/5 border-b border-white/5 flex justify-between items-center">
+                            <h3 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                                <span className="text-lg">Aa</span>
+                                Appearance
+                            </h3>
+                        </div>
+                        <div className="p-4 space-y-4">
+                            {/* Font Family */}
+                            <div className="flex flex-col gap-2">
+                                <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider">Font Face</label>
+                                <div className="flex p-1 bg-black/20 rounded-lg">
+                                    {['Merriweather', 'Inter', 'Courier New'].map(font => (
+                                        <button
+                                            key={font}
+                                            onClick={() => setFontFamily(font)}
+                                            className={`flex-1 py-1.5 text-xs rounded-md transition-all ${fontFamily === font ? 'bg-purple-500 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'}`}
+                                            title={font}
+                                        >
+                                            {font === 'Merriweather' ? 'Serif' : font === 'Inter' ? 'Sans' : 'Mono'}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Font Size */}
+                            <div className="flex flex-col gap-2">
+                                <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider flex justify-between">
+                                    <span>Font Size</span>
+                                    <span className="text-gray-300">{fontSize}px</span>
+                                </label>
+                                <input
+                                    type="range"
+                                    min="14"
+                                    max="32"
+                                    step="1"
+                                    value={fontSize}
+                                    onChange={(e) => setFontSize(Number(e.target.value))}
+                                    className="w-full accent-purple-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                                />
+                                <div className="flex justify-between text-[10px] text-gray-600 font-mono">
+                                    <span>A-</span>
+                                    <span>A+</span>
+                                </div>
+                            </div>
+
+                            {/* Divider */}
+                            <div className="h-px bg-white/10 my-2" />
+
+                            {/* Device Preview */}
+                            <div className="flex flex-col gap-2">
+                                <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider">Device Preview</label>
+                                <div className="grid grid-cols-4 gap-1 p-1 bg-black/20 rounded-lg">
+                                    {[
+                                        { id: 'none', icon: '💻', label: 'None' },
+                                        { id: 'mobile', icon: '📱', label: 'Phone' },
+                                        { id: 'tablet', icon: '📟', label: 'Tablet' },
+                                        { id: 'ereader', icon: '📖', label: 'E-Ink' }
+                                    ].map(mode => (
+                                        <button
+                                            key={mode.id}
+                                            onClick={() => setDeviceMode(mode.id as 'none' | 'mobile' | 'tablet' | 'ereader')}
+                                            className={`p-1.5 rounded-lg transition-all flex items-center justify-center relative group ${deviceMode === mode.id ? 'bg-purple-500 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'}`}
+                                            title={mode.label}
+                                        >
+                                            <span className="text-base">{mode.icon}</span>
+                                            {deviceMode === mode.id && <span className="absolute -bottom-1 w-1 h-1 bg-white rounded-full"></span>}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Divider */}
+                            <div className="h-px bg-white/10 my-2" />
+
+                            {/* Publishing Settings */}
+                            <div className="flex flex-col gap-2">
+                                <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider">Chapter Headers (Export)</label>
+
+                                {/* Style Style */}
+                                <div className="grid grid-cols-4 gap-1 p-1 bg-black/20 rounded-lg mb-2">
+                                    {[
+                                        { id: 'simple', label: 'Simple' },
+                                        { id: 'bold', label: 'Bold' },
+                                        { id: 'modern', label: 'Mod' },
+                                        { id: 'ornate', label: 'Ornate' }
+                                    ].map(s => (
+                                        <button
+                                            key={s.id}
+                                            onClick={() => setHeaderOptions(prev => ({ ...prev, style: s.id as any }))}
+                                            className={`py-1 text-[10px] rounded transition-all ${headerOptions.style === s.id ? 'bg-purple-500 text-white' : 'text-gray-400 hover:text-white'}`}
+                                        >
+                                            {s.label}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                {/* Align & Toggles */}
+                                <div className="flex gap-2">
+                                    <div className="flex bg-black/20 rounded-lg p-1">
+                                        {['left', 'center', 'right'].map(align => (
+                                            <button
+                                                key={align}
+                                                onClick={() => setHeaderOptions(prev => ({ ...prev, alignment: align as any }))}
+                                                className={`p-1.5 rounded transition-all ${headerOptions.alignment === align ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-white'}`}
+                                            >
+                                                {align === 'left' ? '←' : align === 'center' ? '↔' : '→'}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <button
+                                        onClick={() => setHeaderOptions(prev => ({ ...prev, uppercase: !prev.uppercase }))}
+                                        className={`flex-1 rounded p-1 text-[10px] border ${headerOptions.uppercase ? 'border-purple-500/50 text-purple-300 bg-purple-500/10' : 'border-white/5 text-gray-500'}`}
+                                    >
+                                        AB
+                                    </button>
+                                    <button
+                                        onClick={() => setHeaderOptions(prev => ({ ...prev, showChapterNumber: !prev.showChapterNumber }))}
+                                        className={`flex-1 rounded p-1 text-[10px] border ${headerOptions.showChapterNumber ? 'border-purple-500/50 text-purple-300 bg-purple-500/10' : 'border-white/5 text-gray-500'}`}
+                                    >
+                                        #1
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Divider */}
+                            <div className="h-px bg-white/10 my-2" />
+
+                            {/* Front Matter (Export) */}
+                            <div className="flex flex-col gap-3">
+                                <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider">Front Matter (Export)</label>
+                                <div className="space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs text-gray-300">Table of Contents</span>
+                                        <button
+                                            onClick={() => setFrontMatterOptions(prev => ({ ...prev, includeTOC: !prev.includeTOC }))}
+                                            className={`w-8 h-4 rounded-full transition-all ${frontMatterOptions.includeTOC ? 'bg-purple-500' : 'bg-white/10'} relative`}
+                                        >
+                                            <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${frontMatterOptions.includeTOC ? 'left-4' : 'left-0.5'}`} />
+                                        </button>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs text-gray-300">Copyright Page</span>
+                                        <button
+                                            onClick={() => setFrontMatterOptions(prev => ({ ...prev, includeCopyright: !prev.includeCopyright }))}
+                                            className={`w-8 h-4 rounded-full transition-all ${frontMatterOptions.includeCopyright ? 'bg-purple-500' : 'bg-white/10'} relative`}
+                                        >
+                                            <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${frontMatterOptions.includeCopyright ? 'left-4' : 'left-0.5'}`} />
+                                        </button>
+                                    </div>
+                                    <div className="pt-1">
+                                        <input
+                                            type="text"
+                                            placeholder="Dedication (e.g. To Mom...)"
+                                            value={frontMatterOptions.dedication || ''}
+                                            onChange={(e) => setFrontMatterOptions(prev => ({ ...prev, dedication: e.target.value }))}
+                                            className="w-full bg-black/20 text-gray-300 text-xs rounded-lg p-2 border border-white/5 outline-none focus:border-purple-500/50 placeholder-gray-600"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Divider */}
+                            <div className="h-px bg-white/10 my-2" />
+
+                            {/* Genre Benchmarking Widget */}
+                            <div className="flex flex-col gap-3">
+                                <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider">Genre Targets</label>
+                                <select
+                                    value={selectedGenre}
+                                    onChange={(e) => setSelectedGenre(e.target.value as GenreType)}
+                                    className="w-full bg-black/20 text-gray-300 text-xs rounded-lg p-2 border border-white/5 outline-none focus:border-purple-500/50"
+                                >
+                                    {Object.keys(GENRE_PROFILES).map(g => (
+                                        <option key={g} value={g}>{g}</option>
+                                    ))}
+                                </select>
+
+                                {genreResults.length > 0 ? (
+                                    <div className="space-y-3 mt-1">
+                                        {genreResults.map((res, i) => (
+                                            <div key={i} className="flex flex-col gap-1">
+                                                <div className="flex justify-between items-center text-xs">
+                                                    <span className="text-gray-400">{res.metric}</span>
+                                                    <span className={`font-mono font-bold ${res.status === 'good' ? 'text-green-400' :
+                                                        res.status === 'low' ? 'text-blue-400' : 'text-red-400'
+                                                        }`}>
+                                                        {res.yourValue}
+                                                    </span>
+                                                </div>
+                                                <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden relative">
+                                                    {/* Target Range Indicator could be complex, simple color bar for now */}
+                                                    <div className={`h-full w-full ${res.status === 'good' ? 'bg-green-500/50' : 'bg-red-500/50'}`} />
+                                                </div>
+                                                {res.status !== 'good' && (
+                                                    <p className="text-[10px] text-gray-500 italic leading-tight">{res.advice}</p>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="text-[10px] text-gray-600 italic">Write more (100+ words) to see analysis.</p>
+                                )}
+                            </div>
+
+                            {/* Divider */}
+                            <div className="h-px bg-white/10 my-2" />
+
+                            {/* Grammar Widget */}
+                            <div className="flex flex-col gap-3">
+                                <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider">Grammar & Mechanics</label>
+                                {grammarIssues.length === 0 ? (
+                                    <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-center">
+                                        <span className="text-xl block mb-1">✨</span>
+                                        <span className="text-xs text-green-400">All clear!</span>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {grammarIssues.slice(0, 5).map(issue => (
+                                            <div key={issue.id} className="p-2 rounded bg-white/5 border border-white/10 text-xs">
+                                                <div className="flex justify-between mb-1">
+                                                    <span className={`font-bold ${issue.severity === 'info' ? 'text-blue-400' : 'text-yellow-400'}`}>
+                                                        {issue.type === 'consistency' ? 'Consistency' : issue.type === 'typo' ? 'Typo' : 'Grammar'}
+                                                    </span>
+                                                </div>
+                                                <p className="text-gray-300 mb-1">{issue.message}</p>
+                                                <p className="font-mono text-[10px] text-gray-500 bg-black/20 p-1 rounded">"{issue.context}"</p>
+                                                {issue.suggestion && (
+                                                    <div className="mt-1 text-green-400 text-[10px]">
+                                                        ➜ {issue.suggestion}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                        {grammarIssues.length > 5 && (
+                                            <div className="text-center text-[10px] text-gray-500">
+                                                +{grammarIssues.length - 5} more issues
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Divider */}
+                            <div className="h-px bg-white/10 my-2" />
+
+                            {/* Session Goal */}
+                            <div className="flex flex-col gap-3">
+                                <div className="flex items-center justify-between">
+                                    <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider">Session Goal</label>
+                                    <button
+                                        onClick={() => setGoalEnabled(!goalEnabled)}
+                                        className={`w-8 h-4 rounded-full transition-all ${goalEnabled ? 'bg-purple-500' : 'bg-white/20'} relative`}
+                                    >
+                                        <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${goalEnabled ? 'left-4' : 'left-0.5'}`} />
+                                    </button>
+                                </div>
+                                {goalEnabled && (
+                                    <>
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] text-gray-400">Daily Target</span>
+                                            <span className="text-xs font-bold text-purple-300 font-mono">{dailyGoal} words</span>
+                                        </div>
+                                        <input
+                                            type="range"
+                                            min="100"
+                                            max="3000"
+                                            step="50"
+                                            value={dailyGoal}
+                                            onChange={(e) => setDailyGoal(Number(e.target.value))}
+                                            className="w-full accent-purple-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                                        />
+                                        <div className="flex justify-between text-[9px] text-gray-600 font-mono">
+                                            <span>100</span>
+                                            <span>1500</span>
+                                            <span>3000</span>
+                                        </div>
+                                        <button
+                                            onClick={() => {
+                                                setSessionStartWords(stats?.wordCount || 0);
+                                                sessionInitialized.current = true;
+                                            }}
+                                            className="mt-1 text-[10px] text-gray-400 hover:text-white underline decoration-dotted transition-colors"
+                                        >
+                                            Reset session counter
+                                        </button>
+                                    </>
+                                )}
+                            </div>
+
+                            {/* Divider */}
+                            <div className="h-px bg-white/10 my-2" />
+
+                            {/* Typewriter Mode */}
+                            <div className="flex items-center justify-between">
+                                <div className="flex flex-col">
+                                    <label className="text-[10px] uppercase font-bold text-gray-500 tracking-wider">Typewriter Mode</label>
+                                    <span className="text-[9px] text-gray-600">Keeps cursor centered</span>
+                                </div>
+                                <button
+                                    onClick={() => setTypewriterMode(!typewriterMode)}
+                                    className={`w-8 h-4 rounded-full transition-all ${typewriterMode ? 'bg-purple-500' : 'bg-white/20'} relative`}
+                                >
+                                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${typewriterMode ? 'left-4' : 'left-0.5'}`} />
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Scratchpad Widget */}
+                    <div className="bg-card rounded-xl border border-white/5 flex flex-col overflow-hidden shadow-sm flex-shrink-0">
+                        <div className="p-3 bg-white/5 border-b border-white/5 flex justify-between items-center">
+                            <h3 className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                                <span className="text-lg">💡</span>
+                                Scratchpad
+                            </h3>
+                            {saveStatus === 'saving' && <span className="text-[10px] text-yellow-500 animate-pulse">Syncing...</span>}
+                        </div>
+                        {activeFileName && (
+                            <div className="px-3 py-1 text-[10px] text-gray-500 bg-white/5 border-b border-white/5 truncate">
+                                Context: <span className="text-gray-300">{activeFileName}</span>
+                            </div>
+                        )}
+                        <textarea
+                            key={draftId} // Force re-render on file switch
+                            className="w-full h-32 bg-transparent p-3 text-sm text-gray-300 placeholder:text-gray-600 resize-none outline-none font-mono"
+                            placeholder="Jot down quick ideas..."
+                            value={notes}
+                            onChange={(e) => {
+                                setNotes(e.target.value);
+                                if (saveStatus === 'saved') setSaveStatus('saving');
+                            }}
+                        />
+                    </div>
+
+                    {/* Context Hints (Lore) */}
+                    {activeContext.length > 0 && (
+                        <div className="bg-card rounded-xl border border-white/5 p-4 flex-shrink-0 animate-in fade-in">
+                            <h3 className="text-xs font-semibold text-purple-400 mb-2 uppercase tracking-wide flex items-center gap-2">
+                                <span>✦ Context Detected</span>
+                            </h3>
+                            <div className="space-y-2">
+                                {activeContext.map((file, i) => (
+                                    <button
+                                        key={i}
+                                        onClick={() => setViewingLore(file)}
+                                        className="w-full text-left p-2 rounded bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 transition-colors group"
+                                    >
+                                        <div className="text-xs font-bold text-purple-200 group-hover:text-white flex items-center gap-2">
+                                            {file.name.replace('.md', '')}
+                                            <span className="text-[10px] opacity-50">↗</span>
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 line-clamp-2 mt-1">
+                                            {file.content.substring(0, 100)}...
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Expert Editor Insights */}
+                    {editorInsights.length > 0 && (
+                        <div className="bg-card rounded-xl border border-white/5 p-4 flex-shrink-0 animate-in fade-in">
+                            <h3 className="text-xs font-semibold text-gray-400 mb-3 uppercase tracking-wide flex justify-between items-center">
+                                <span>Editor Feedback</span>
+                                <button onClick={() => setEditorInsights([])} className="hover:text-white">Clear</button>
+                            </h3>
+                            <div className="space-y-3">
+                                {editorInsights.map((insight, i) => (
+                                    <div key={i} className={`p-3 rounded-lg border flex flex-col gap-1 ${insight.type === 'warning' ? 'bg-red-500/10 border-red-500/20' :
+                                        insight.type === 'suggestion' ? 'bg-blue-500/10 border-blue-500/20' :
+                                            'bg-green-500/10 border-green-500/20'
+                                        }`}>
+                                        <div className="flex items-center justify-between">
+                                            <span className={`text-[10px] font-bold uppercase tracking-wider ${insight.type === 'warning' ? 'text-red-400' :
+                                                insight.type === 'suggestion' ? 'text-blue-400' :
+                                                    'text-green-400'
+                                                }`}>{insight.type}</span>
+                                        </div>
+                                        <p className="text-sm text-gray-200 font-medium">{insight.message}</p>
+                                        <p className="text-xs text-gray-500 italic border-t border-white/5 pt-1 mt-1">{insight.context}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Sentence Flow (Pacing) */}
+                    <div className="bg-card rounded-xl border border-white/5 p-4 flex-shrink-0">
+                        <h3 className="text-xs font-semibold text-gray-400 mb-3 uppercase tracking-wide">
+                            Sentence Flow (Last 20)
+                        </h3>
+                        <div className="flex items-end gap-[2px] h-16 w-full border-b border-white/10 pb-1">
+                            {useMemo(() => {
+                                const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                                const lengths = analyzeSentenceLengths(plainText);
+                                // Take last 20
+                                const last20 = lengths.slice(-20);
+                                if (last20.length === 0) return <div className="text-xs text-gray-600 w-full text-center self-center">Start writing...</div>;
+
+                                return last20.map((len, idx) => {
+                                    // Height percentage relative to max in this window, capped at 100%
+                                    const h = Math.min(100, (len / 40) * 100);
+                                    let color = 'bg-blue-500/50';
+                                    if (len < 8) color = 'bg-green-500/50'; // Short
+                                    if (len > 25) color = 'bg-pink-500/50'; // Long
+                                    if (len > 40) color = 'bg-red-500/80';  // Very Long
+
+                                    return (
+                                        <div
+                                            key={idx}
+                                            className={`flex-1 rounded-t-sm transition-all hover:opacity-100 opacity-80 ${color}`}
+                                            style={{ height: `${h}%` }}
+                                            title={`${len} words`}
+                                        />
+                                    );
+                                });
+                            }, [debouncedContent])}
+                        </div>
+                        <div className="flex justify-between text-[9px] text-gray-600 mt-1 font-mono uppercase">
+                            <span>Oldest</span>
+                            <span>Newest</span>
+                        </div>
+                    </div>
+
+                    {/* Pacing Graph (Paragraph Density) */}
+                    <div className="bg-card rounded-xl border border-white/5 p-4 flex-shrink-0">
+                        <h3 className="text-xs font-semibold text-gray-400 mb-3 uppercase tracking-wide flex items-center justify-between">
+                            <span>Pacing Graph</span>
+                            <span className="text-[9px] font-normal normal-case text-gray-600">by paragraph</span>
+                        </h3>
+                        <div className="flex flex-col gap-1">
+                            {useMemo(() => {
+                                const plainText = debouncedContent.replace(/<[^>]*>/g, '\n').replace(/\s+/g, ' ').trim();
+                                const pacing = analyzeParagraphPacing(plainText);
+
+                                if (pacing.length === 0) return <div className="text-xs text-gray-600 text-center py-4">Add paragraphs to see pacing...</div>;
+
+                                // Show last 10 paragraphs
+                                const display = pacing.slice(-10);
+                                const maxWords = Math.max(...display.map(p => p.words), 1);
+
+                                return display.map((para, idx) => {
+                                    const widthPercent = (para.words / maxWords) * 100;
+                                    let barColor = 'bg-blue-500/60';
+                                    if (para.intensity === 'fast') barColor = 'bg-green-500/60';
+                                    if (para.intensity === 'slow') barColor = 'bg-orange-500/60';
+                                    if (para.isDialogue) barColor = 'bg-purple-500/60';
+
+                                    return (
+                                        <div key={idx} className="flex items-center gap-2 group">
+                                            <div className="w-6 text-[9px] text-gray-600 text-right font-mono">
+                                                {idx + 1}
+                                            </div>
+                                            <div className="flex-1 h-3 bg-white/5 rounded-sm overflow-hidden">
+                                                <div
+                                                    className={`h-full rounded-sm transition-all ${barColor}`}
+                                                    style={{ width: `${widthPercent}%` }}
+                                                    title={`${para.words} words, ${para.sentences} sentences, ${para.intensity} pace${para.isDialogue ? ', dialogue' : ''}`}
+                                                />
+                                            </div>
+                                            <div className="w-8 text-[9px] text-gray-500 font-mono">
+                                                {para.words}w
+                                            </div>
+                                        </div>
+                                    );
+                                });
+                            }, [debouncedContent])}
+                        </div>
+                        <div className="flex justify-center gap-3 mt-3 text-[8px] text-gray-600">
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-green-500/60"></span> Fast</span>
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-blue-500/60"></span> Medium</span>
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-orange-500/60"></span> Slow</span>
+                            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-purple-500/60"></span> Dialogue</span>
+                        </div>
+                    </div>
+
+                    {/* Sentiment Arc */}
+                    <div className="bg-card rounded-xl border border-white/5 p-4 flex-shrink-0">
+                        <h3 className="text-xs font-semibold text-gray-400 mb-3 uppercase tracking-wide flex items-center justify-between">
+                            <span>Sentiment Arc</span>
+                            <span className="text-[9px] font-normal normal-case text-gray-600">Emotional tone over time</span>
+                        </h3>
+                        {useMemo(() => {
+                            const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                            if (plainText.length < 50) return <div className="text-xs text-gray-600 text-center py-4">Write more to see sentiment data...</div>;
+
+                            const points = analyzeSentimentArc(plainText, 20); // 20 chunks
+
+                            return (
+                                <div>
+                                    <div className="h-24 flex gap-0.5 w-full relative">
+                                        {/* Zero Line */}
+                                        <div className="absolute top-1/2 left-0 right-0 h-[1px] bg-white/10 z-0" />
+
+                                        {points.map((p, i) => {
+                                            // Scale: Assume max score ~5 per chunk for normalization. Cap at 10.
+                                            const intensity = Math.min(100, Math.abs(p.score) * 20); // * 20 means score of 5 hits 100%
+
+                                            // Tooltip context
+                                            const tip = `Chunk ${p.chunk}: ${p.score > 0 ? '+' : ''}${p.score} (${p.score > 0 ? 'Pos' : p.score < 0 ? 'Neg' : 'Neut'})\n"${p.text}..."`;
+
+                                            return (
+                                                <div key={i} className="flex-1 flex flex-col h-full z-10 group relative" title={tip}>
+                                                    {/* Positive Half */}
+                                                    <div className="h-1/2 flex items-end justify-center w-full">
+                                                        {p.score > 0 && (
+                                                            <div
+                                                                className="w-full bg-emerald-500/60 rounded-t-sm transition-all group-hover:bg-emerald-400"
+                                                                style={{ height: `${intensity}%` }}
+                                                            />
+                                                        )}
+                                                    </div>
+                                                    {/* Negative Half */}
+                                                    <div className="h-1/2 flex items-start justify-center w-full">
+                                                        {p.score < 0 && (
+                                                            <div
+                                                                className="w-full bg-rose-500/60 rounded-b-sm transition-all group-hover:bg-rose-400"
+                                                                style={{ height: `${intensity}%` }}
+                                                            />
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    <div className="flex justify-between text-[8px] text-gray-600 mt-2 font-mono uppercase px-1">
+                                        <span>Start</span>
+                                        <span>Story Progress</span>
+                                        <span>End</span>
+                                    </div>
+                                </div>
+                            );
+                        }, [debouncedContent])}
+                    </div>
+
+                    {/* Word Explorer (Thesaurus) */}
+                    <div className="bg-card rounded-xl border border-white/5 p-4 flex-shrink-0">
+                        <h3 className="text-xs font-semibold text-gray-400 mb-3 uppercase tracking-wide flex items-center gap-2">
+                            <span>📚</span> Word Explorer
+                        </h3>
+                        <div className="space-y-2">
+                            {useMemo(() => {
+                                const plainText = debouncedContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                                const overused = getOverusedWords(plainText);
+
+                                if (overused.length === 0) {
+                                    return <div className="text-xs text-gray-600 text-center py-2">No overused words detected</div>;
+                                }
+
+                                return overused.slice(0, 4).map((item, idx) => (
+                                    <div key={idx} className="p-2 bg-white/5 rounded-lg border border-white/10">
+                                        <div className="flex items-center justify-between mb-1">
+                                            <span className="font-semibold text-amber-300 text-sm">"{item.word}"</span>
+                                            <span className="text-[10px] text-gray-500">×{item.count}</span>
+                                        </div>
+                                        <div className="flex flex-wrap gap-1">
+                                            {item.synonyms.slice(0, 4).map((syn, i) => (
+                                                <span
+                                                    key={i}
+                                                    className="text-[10px] px-1.5 py-0.5 bg-purple-500/20 text-purple-300 rounded cursor-pointer hover:bg-purple-500/40 transition-colors"
+                                                    title={`Click to copy: ${syn}`}
+                                                    onClick={() => navigator.clipboard.writeText(syn)}
+                                                >
+                                                    {syn}
+                                                </span>
+                                            ))}
+                                            {item.synonyms.length > 4 && (
+                                                <span className="text-[10px] text-gray-500">+{item.synonyms.length - 4}</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                ));
+                            }, [debouncedContent])}
+                        </div>
+                    </div>
+
+                    {/* Obsidian Sync Widget */}
+                    <ObsidianWidget
+                        files={obsidianFiles}
+                        onConnect={handleObsidianConnect}
+                        onPreview={(file) => setViewingLore(file)}
+                    />
+
+                    {/* Google Drive Status (Minimal) */}
+                    <div className="bg-card rounded-xl border border-white/5 p-4 opacity-75 hover:opacity-100 transition-opacity">
+                        <div className="flex items-center justify-between">
+                            <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+                                <span className="w-4 h-4 text-green-500">
+                                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.784 14l.42-2.184L8.7 11h6.6l.5 2.5.5 2.5h-9.5z" fill="#00AC47" /><path d="M8.7 11V8.5H5.8L4.35 11h4.35zM5.8 8.5H13.6L12.35 11H8.7V8.5z" fill="#0066DA" /><path d="M12.35 11l2.9-5h-5.8l-1.45 2.5 1.45 2.5h2.9z" fill="#EA4335" /><path d="M12.35 11L13.6 8.5h4.6l1.45 2.5-1.45 2.5H13.6l-1.25-2.5z" fill="#FFBA00" /><path d="M7.784 14H4.35l4.35 7.5L12.35 16l-4.566-2z" fill="#00AC47" /><path d="M13.6 16l4.35-7.5h-5.6l-2.9 5 2.9 5h4.6l-3.35-2.5z" fill="#2684FC" /></svg>
+                                </span>
+                                Cloud Status
+                            </h3>
+                            {isGoogleConnected ? (
+                                <span className="text-[10px] text-green-400 bg-green-400/10 px-2 py-0.5 rounded-full">Connected</span>
+                            ) : (
+                                <button onClick={handleDriveConnect} className="text-[10px] text-blue-400 hover:underline">Connect</button>
+                            )}
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            {/* Lore Preview Modal (Toast-like) */}
+            {
+                viewingLore && (
+                    <div className="fixed bottom-6 right-6 w-96 max-h-[80vh] bg-gray-900 border border-purple-500/30 rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-bottom-10 z-50">
+                        <div className="p-3 bg-purple-900/20 border-b border-white/10 flex justify-between items-center">
+                            <h3 className="font-bold text-sm text-purple-300 truncate pr-2">
+                                {viewingLore.name.replace('.md', '')}
+                            </h3>
+                            <button
+                                onClick={() => setViewingLore(null)}
+                                className="text-gray-400 hover:text-white transition-colors"
+                            >
+                                ✕
+                            </button>
+                        </div>
+                        <div className="p-4 overflow-y-auto text-sm text-gray-300 leading-relaxed font-serif whitespace-pre-wrap custom-scrollbar">
+                            {viewingLore.content}
+                        </div>
+                        <div className="p-2 bg-black/20 border-t border-white/5 flex justify-end gap-2">
+                            <button
+                                onClick={() => {
+                                    setNotes(prev => prev + `\n\n--- ${viewingLore.name} ---\n` + viewingLore.content);
+                                    setViewingLore(null);
+                                }}
+                                className="text-[10px] text-gray-500 hover:text-white"
+                            >
+                                Append to Notes
+                            </button>
+                        </div>
+                    </div>
+                )
+            }
+            {/* Drive Picker Modal */}
+            <DrivePickerModal
+                isOpen={showDrivePicker}
+                onClose={() => setShowDrivePicker(false)}
+                onSelect={(folderId, folderName) => {
+                    handleNavigateFolder(folderId, folderName);
+                    setShowDrivePicker(false);
+                }}
+                initialFolderId={currentDriveFolder}
+            />
+        </div >
+    );
+}
+
+
+
+
