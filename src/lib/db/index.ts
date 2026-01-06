@@ -71,13 +71,18 @@ export async function saveDraft(draft: SceneDraft) {
 
         if (draft.googleDocId) payload.google_doc_id = draft.googleDocId;
 
-        const { error } = await supabase.from('drafts').upsert(payload);
+        // Only attempt cloud sync if Supabase is configured
+        if (supabase) {
+            const { error } = await supabase.from('drafts').upsert(payload);
 
-        if (error) {
-            console.error("[Cloud] Sync failed:", error);
-            return false; // Or user specific error handling
+            if (error) {
+                console.error("[Cloud] Sync failed:", error);
+                return false; // Or user specific error handling
+            } else {
+                console.log(`[Cloud] Synced draft: ${draft.id}`);
+            }
         } else {
-            console.log(`[Cloud] Synced draft: ${draft.id}`);
+            console.log("[Cloud] Supabase not configured, skipping cloud sync");
         }
 
         return true;
@@ -121,7 +126,7 @@ export async function getDraft(id: string) {
     }
 
     // 2. If nothing local, try cloud (New Device Scenario)
-    if (!local) {
+    if (!local && supabase) {
         console.log("[Local] Cache miss, checking cloud...");
         const { data, error } = await supabase
             .from('drafts')
