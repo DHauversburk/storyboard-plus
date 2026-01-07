@@ -16,7 +16,7 @@ interface HighlightMenuProps {
     onViewCodex: (entry: CodexEntry) => void;
 }
 
-type MenuMode = 'menu' | 'synonyms' | 'definition';
+type MenuMode = 'menu' | 'synonyms' | 'definition' | 'codex';
 
 export const HighlightMenu: React.FC<HighlightMenuProps> = ({
     position,
@@ -121,7 +121,7 @@ export const HighlightMenu: React.FC<HighlightMenuProps> = ({
                             <>
                                 <div className="w-px h-3 bg-white/10 mx-1" />
                                 <button
-                                    onClick={() => onViewCodex(codexEntry)}
+                                    onClick={() => setMode('codex')}
                                     className="p-1.5 hover:bg-purple-500/20 rounded text-purple-300 hover:text-purple-200 transition-colors text-xs font-bold px-2 flex items-center gap-1"
                                     title={`Open Codex: ${codexEntry.name}`}
                                 >
@@ -184,6 +184,34 @@ export const HighlightMenu: React.FC<HighlightMenuProps> = ({
                                 </div>
                             </div>
                         )}
+                    </div>
+                )}
+
+                {/* Codex Mode */}
+                {mode === 'codex' && codexEntry && (
+                    <div className="flex flex-col w-full">
+                        <div className="flex items-center justify-between p-2 border-b border-white/5 bg-white/5">
+                            <span className="text-[10px] uppercase font-bold text-gray-500 flex items-center gap-1">
+                                <span className="text-purple-400">✦</span>
+                                {codexEntry.name.replace('.md', '')}
+                            </span>
+                            <button onClick={() => setMode('menu')} className="text-gray-500 hover:text-white text-xs">← Back</button>
+                        </div>
+                        <div className="p-3 max-h-60 overflow-y-auto custom-scrollbar">
+                            <div className="text-xs text-gray-300 leading-relaxed font-serif whitespace-pre-wrap">
+                                {codexEntry.content.length > 300
+                                    ? codexEntry.content.substring(0, 300) + '...'
+                                    : codexEntry.content}
+                            </div>
+                            <div className="mt-3 pt-2 border-t border-white/5">
+                                <button
+                                    onClick={() => onViewCodex(codexEntry)}
+                                    className="w-full py-1.5 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 rounded text-xs text-purple-300 font-medium transition-colors flex items-center justify-center gap-2"
+                                >
+                                    Open Full Entry ↗
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 )}
             </div>
