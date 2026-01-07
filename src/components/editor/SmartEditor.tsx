@@ -250,6 +250,12 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
         if (savedGoal) setDailyGoal(parseInt(savedGoal, 10));
         if (savedEnabled !== null) setGoalEnabled(savedEnabled === 'true');
         if (savedTypewriter !== null) setTypewriterMode(savedTypewriter === 'true');
+
+        // Restore Obsidian Files from LocalStorage
+        const cachedFiles = loadObsidianFiles();
+        if (cachedFiles && cachedFiles.length > 0) {
+            setObsidianFiles(cachedFiles);
+        }
     }, []);
 
     // Save preferences when they change
@@ -362,11 +368,24 @@ export function SmartEditor({ initialContent = "", sceneId }: SmartEditorProps) 
                 // Determine matches
                 let codexMatch = null;
                 const cleanText = text.toLowerCase();
-                obsidianFiles.forEach(f => {
-                    if (f.name.toLowerCase().replace('.md', '') === cleanText) {
+
+                // Find the best match
+                // Priority: Exact Match > Contains Match
+                for (const f of obsidianFiles) {
+                    // Normalize filename (remove path and extension)
+                    const rawName = f.name.toLowerCase();
+                    const name = rawName.split('/').pop()?.replace('.md', '') || rawName.replace('.md', '');
+
+                    if (name === cleanText) {
+                        codexMatch = f;
+                        break; // Exact match found, stop searching
+                    }
+
+                    // Partial match (if text is substantial)
+                    if (!codexMatch && cleanText.length > 3 && name.includes(cleanText)) {
                         codexMatch = f;
                     }
-                });
+                }
 
                 const synonyms = getSynonyms(text);
 
