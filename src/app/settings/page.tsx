@@ -11,6 +11,7 @@ export default function SettingsPage() {
 
     const [clientId, setClientId] = useState(envClientId);
     const [apiKey, setApiKey] = useState(envApiKey);
+    const [geminiApiKey, setGeminiApiKey] = useState('');
     const [webhookUrl, setWebhookUrl] = useState('');
     const [status, setStatus] = useState<'idle' | 'saved'>('idle');
     const [showGuide, setShowGuide] = useState(false);
@@ -24,12 +25,16 @@ export default function SettingsPage() {
         if (storedClientId) setClientId(storedClientId);
         if (storedApiKey) setApiKey(storedApiKey);
         if (storedWebhook) setWebhookUrl(storedWebhook);
+
+        const storedGeminiKey = localStorage.getItem('gemini_api_key');
+        if (storedGeminiKey) setGeminiApiKey(storedGeminiKey);
     }, []);
 
     const handleSave = () => {
         localStorage.setItem('google_client_id', clientId);
         localStorage.setItem('google_api_key', apiKey);
         localStorage.setItem('webhook_url', webhookUrl);
+        localStorage.setItem('gemini_api_key', geminiApiKey);
 
         setStatus('saved');
         setTimeout(() => setStatus('idle'), 2000);
@@ -41,6 +46,37 @@ export default function SettingsPage() {
             <p className="text-gray-400 mb-8">Configure your workspace and integrations.</p>
 
             <div className="space-y-6">
+
+                {/* AI Integration Card */}
+                <Card className="border-blue-500/20 bg-blue-900/5">
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-3">
+                            <span className="w-8 h-8 rounded bg-blue-500/20 flex items-center justify-center text-blue-400">
+                                ✦
+                            </span>
+                            AI Features (Gemini)
+                        </CardTitle>
+                        <CardDescription>
+                            Enable smart summarization and advanced analysis.
+                            <br />
+                            <a href="https://aistudio.google.com/app/apikey" target="_blank" className="underline text-blue-400 hover:text-blue-300 mt-2 inline-block text-xs">
+                                Get a free Gemini API Key ↗
+                            </a>
+                        </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <div className="space-y-2">
+                            <label className="text-sm font-medium text-gray-300">Gemini API Key</label>
+                            <input
+                                type="password"
+                                className="w-full bg-black/40 border border-white/10 rounded-md p-2 text-sm text-gray-200 focus:border-blue-500/50 outline-none transition-colors placeholder:text-gray-700 font-mono"
+                                placeholder="AIza..."
+                                value={geminiApiKey}
+                                onChange={(e) => setGeminiApiKey(e.target.value)}
+                            />
+                        </div>
+                    </CardContent>
+                </Card>
 
                 {/* Google Drive Integration Card */}
                 <Card className="border-green-500/20 bg-green-900/5">

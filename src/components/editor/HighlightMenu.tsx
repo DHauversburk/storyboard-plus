@@ -1,5 +1,6 @@
 
 import React, { useEffect, useState } from 'react';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 interface CodexEntry {
     name: string;
@@ -30,12 +31,14 @@ export const HighlightMenu: React.FC<HighlightMenuProps> = ({
     const [mode, setMode] = useState<MenuMode>('menu');
     const [fetchedSynonyms, setFetchedSynonyms] = useState<string[]>([]);
     const [definition, setDefinition] = useState<string | null>(null);
+    const [summary, setSummary] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
 
     useEffect(() => {
         setMode('menu');
         setFetchedSynonyms([]);
         setDefinition(null);
+        setSummary(null);
     }, [selectedText]);
 
     const handleFetchSynonyms = async () => {
@@ -75,6 +78,28 @@ export const HighlightMenu: React.FC<HighlightMenuProps> = ({
             setDefinition("No definition found.");
         } catch {
             setDefinition("Could not fetch definition.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleSummarize = async () => {
+        const apiKey = localStorage.getItem('gemini_api_key');
+        if (!apiKey || !codexEntry) return;
+
+        setLoading(true);
+        try {
+            const genAI = new GoogleGenerativeAI(apiKey);
+            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+            const prompt = `Summarize the following text in under 280 characters, focusing on key facts and lore:\n\n${codexEntry.content}`;
+
+            const result = await model.generateContent(prompt);
+            const response = await result.response;
+            setSummary(response.text());
+        } catch (error) {
+            console.error(error);
+            setSummary("Failed to generate summary. Check your API key.");
         } finally {
             setLoading(false);
         }
@@ -199,10 +224,27 @@ export const HighlightMenu: React.FC<HighlightMenuProps> = ({
                         </div>
                         <div className="p-3 max-h-60 overflow-y-auto custom-scrollbar">
                             <div className="text-xs text-gray-300 leading-relaxed font-serif whitespace-pre-wrap">
-                                {codexEntry.content.length > 300
-                                    ? codexEntry.content.substring(0, 300) + '...'
-                                    : codexEntry.content}
+                                {loading && !summary ? (
+                                    <span className="animate-pulse text-purple-400">✨ Summoning summary...</span>
+                                ) : summary ? (
+                                    <span className="text-purple-200">{summary}</span>
+                                ) : (
+                                    codexEntry.content.length > 300
+                                        ? codexEntry.content.substring(0, 300) + '...'
+                                        : codexEntry.content
+                                )}
                             </div>
+
+                            {/* AI Summary Action */}
+                            {!summary && !loading && codexEntry.content.length > 300 && (
+                                <button
+                                    onClick={handleSummarize}
+                                    className="w-full mt-2 py-1 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 rounded text-[10px] text-purple-300 transition-colors flex items-center justify-center gap-1"
+                                >
+                                    <span>✨</span> Summarize with AI
+                                </button>
+                            )}
+
                             <div className="mt-3 pt-2 border-t border-white/5">
                                 <button
                                     onClick={() => onViewCodex(codexEntry)}
